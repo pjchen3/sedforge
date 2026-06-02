@@ -12,6 +12,7 @@ import requests
 from astropy.io import ascii
 from astropy.io.votable import parse
 
+from sedforge._compat import trapezoid
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_DIR = ROOT / "sedforge"
@@ -66,17 +67,17 @@ def _eff_wave(wave, trans, response_type, vega_wave, vega_flux):
         weight = vega * trans * _integration_weight(response_type, wave)
     else:
         weight = trans * _integration_weight(response_type, wave)
-    denom = np.trapz(weight, x=wave)
+    denom = trapezoid(weight, x=wave)
     if denom <= 0 or not np.isfinite(denom):
         return np.nan
-    return np.trapz(wave * weight, x=wave) / denom
+    return trapezoid(wave * weight, x=wave) / denom
 
 
 def _bandwidth(wave, trans):
     max_trans = np.nanmax(trans)
     if max_trans <= 0 or not np.isfinite(max_trans):
         return np.nan
-    return np.trapz(trans, x=wave) / max_trans
+    return trapezoid(trans, x=wave) / max_trans
 
 
 def _write_curve(path, photband, svo_id, response_type, params, wave, trans):

@@ -19,6 +19,7 @@ import numpy as np
 import yaml
 from astropy.table import Table
 
+from sedforge._compat import trapezoid
 from sedforge import filters, integrate_grid, model
 
 
@@ -174,13 +175,13 @@ def expected_alpha0_count(newera_dir):
 
 def throughput_coverage(photband, wave_min, wave_max):
     wave, trans = filters.get_response(photband)
-    denom = np.trapz(trans * wave, x=wave)
+    denom = trapezoid(trans * wave, x=wave)
     if denom <= 0 or not np.isfinite(denom):
         return 0.0
     inside = (wave_min <= wave) & (wave <= wave_max)
     if np.count_nonzero(inside) < 2:
         return 0.0
-    return np.trapz(trans[inside] * wave[inside], x=wave[inside]) / denom
+    return trapezoid(trans[inside] * wave[inside], x=wave[inside]) / denom
 
 
 def select_responses(wave, requested=None, min_coverage=0.99):

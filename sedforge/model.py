@@ -7,6 +7,7 @@ import numpy as np
 
 from astropy.io import fits
 
+from sedforge._compat import trapezoid
 from sedforge import interpol, spectral_cache
 
 PC_TO_RSOL = 44365810.04823812
@@ -1214,6 +1215,6 @@ def luminosity(wave, flux, radius=1.):
     """
     Lsol_cgs = 3.846e33
     Rsol_cgs = 6.95508e10
-    Lint = np.trapz(flux, x=wave)
+    Lint = trapezoid(flux, x=wave)
     Labs = Lint * 4 * np.pi / Lsol_cgs * (radius * Rsol_cgs) ** 2
     return Labs

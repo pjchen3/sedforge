@@ -6,6 +6,7 @@ import numpy as np
 
 from astropy.io import ascii
 from astropy.table import Table
+from sedforge._compat import trapezoid
 basedir = os.path.dirname(__file__)
 response_dir = os.path.join(basedir, 'transmission_curves')
 _vega_cache = None
@@ -163,10 +164,10 @@ def _resolve_response_file(photband):
 def _throughput_weighted_wave(photband):
     wave, trans = get_response(photband)
     weight = trans * integration_weight(photband, wave)
-    norm = np.trapz(weight, x=wave)
+    norm = trapezoid(weight, x=wave)
     if norm <= 0:
         raise ValueError(f'Response curve for {photband} has zero throughput.')
-    return np.trapz(wave * weight, x=wave) / norm
+    return trapezoid(wave * weight, x=wave) / norm
 
 
 def _vega_effective_wave(photband):
@@ -187,10 +188,10 @@ def _vega_effective_wave(photband):
     trans = trans[valid]
     vega = vega[valid]
     weight = vega * trans * integration_weight(photband, wave)
-    norm = np.trapz(weight, x=wave)
+    norm = trapezoid(weight, x=wave)
     if norm <= 0 or not np.isfinite(norm):
         return _throughput_weighted_wave(photband)
-    return np.trapz(wave * weight, x=wave) / norm
+    return trapezoid(wave * weight, x=wave) / norm
 
 
 def _response_bandwidth(photband):
@@ -201,7 +202,7 @@ def _response_bandwidth(photband):
     max_trans = np.nanmax(trans)
     if max_trans <= 0 or not np.isfinite(max_trans):
         raise ValueError(f'Response curve for {photband} has zero throughput.')
-    return np.trapz(trans, x=wave) / max_trans
+    return trapezoid(trans, x=wave) / max_trans
 
 
 def bandwidth(photband):
@@ -362,8 +363,8 @@ def synthetic_flux(wave, flux, photbands):
 
         # -- WE WORK IN FLAMBDA
         energys[i] = (
-            np.trapz(flux_ * transr * weight, x=wave_)
-            / np.trapz(transr * weight, x=wave_)
+            trapezoid(flux_ * transr * weight, x=wave_)
+            / trapezoid(transr * weight, x=wave_)
         )
 
     # -- that's it!

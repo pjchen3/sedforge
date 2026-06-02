@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from sedforge import filters, integrate_grid
+from sedforge._compat import trapezoid
 
 
 def test_list_response_uses_local_transmission_curves():
@@ -32,7 +33,7 @@ def test_filter_info_eff_wave_matches_vega_weighted_response_curve():
     vega_wave, vega_flux = filters._load_vega()
     vega = np.interp(wave, vega_wave, vega_flux)
     weight = vega * trans * wave
-    expected = np.trapz(wave * weight, x=wave) / np.trapz(weight, x=wave)
+    expected = trapezoid(wave * weight, x=wave) / trapezoid(weight, x=wave)
     info = filters._load_filter_info()
     row = info[info['photband'] == 'GAIA3E_G'][0]
 
@@ -81,7 +82,7 @@ def test_synthetic_flux_uses_energy_weight_for_energy_responses(photband):
     flux = (wave / 35000.0) ** -2
     waver, transr = filters.get_response(photband)
     flux_i = np.interp(waver, wave, flux)
-    expected = np.trapz(flux_i * transr, x=waver) / np.trapz(transr, x=waver)
+    expected = trapezoid(flux_i * transr, x=waver) / trapezoid(transr, x=waver)
 
     synflux = filters.synthetic_flux(wave, flux, [photband])
 

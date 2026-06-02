@@ -1,5 +1,3 @@
-import os
-
 import numpy as np
 
 from sedforge import fileio
@@ -36,42 +34,30 @@ datafile: none   # filepath to write results of all walkers
 
 class TestFileIO:
 
-    def test_write2fits(self):
+    def test_write2fits(self, tmp_path):
 
         data = np.array([(1, 2), (2, 3)], dtype=[('a', 'f8'), ('b', 'f8')])
+        filename = tmp_path / 'testfile.fits'
 
-        try:
-            fileio.write2fits(data, 'testfile.fits', setup=default)
+        fileio.write2fits(data, filename, setup=default)
 
-            samples, setup = fileio.read_fits('testfile.fits')
+        samples, setup = fileio.read_fits(filename)
 
-            assert setup == default
+        assert setup == default
 
-            for name in data.dtype.names:
-                for v1, v2 in zip(data[name], samples[name]):
-                    assert v1 == v2
+        for name in data.dtype.names:
+            for v1, v2 in zip(data[name], samples[name]):
+                assert v1 == v2
 
-            os.remove('testfile.fits')
-
-        finally:
-            if os.path.isfile('testfile.fits'):
-                os.remove('testfile.fits')
-
-    def test_write2fits_accepts_setup_dict(self):
+    def test_write2fits_accepts_setup_dict(self, tmp_path):
         data = np.array([(1, 2), (2, 3)], dtype=[('a', 'f8'), ('b', 'f8')])
         setup = {'photometryfile': 'target.phot', 'pnames': ['teff', 'distance']}
+        filename = tmp_path / 'testfile_dict_setup.fits'
 
-        try:
-            fileio.write2fits(data, 'testfile_dict_setup.fits', setup=setup)
-            samples, setup_text = fileio.read_fits('testfile_dict_setup.fits')
+        fileio.write2fits(data, filename, setup=setup)
+        samples, setup_text = fileio.read_fits(filename)
 
-            assert 'photometryfile: target.phot' in setup_text
-            for name in data.dtype.names:
-                for v1, v2 in zip(data[name], samples[name]):
-                    assert v1 == v2
-
-            os.remove('testfile_dict_setup.fits')
-
-        finally:
-            if os.path.isfile('testfile_dict_setup.fits'):
-                os.remove('testfile_dict_setup.fits')
+        assert 'photometryfile: target.phot' in setup_text
+        for name in data.dtype.names:
+            for v1, v2 in zip(data[name], samples[name]):
+                assert v1 == v2

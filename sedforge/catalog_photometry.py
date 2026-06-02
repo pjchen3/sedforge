@@ -24,6 +24,7 @@ from astropy.io import ascii
 from astropy.table import Table
 import astropy.units as u
 
+from ._compat import trapezoid
 from . import filters
 
 
@@ -301,10 +302,10 @@ def _vega_flux_on_response(photband):
 
 def _band_averaged_flux(wave, flux, trans, photband):
     weight = filters.integration_weight(photband, wave)
-    denom = np.trapz(trans * weight, x=wave)
+    denom = trapezoid(trans * weight, x=wave)
     if denom <= 0:
         raise ValueError("Filter response has zero integrated throughput.")
-    return np.trapz(flux * trans * weight, x=wave) / denom
+    return trapezoid(flux * trans * weight, x=wave) / denom
 
 
 def normalise_magnitude_system(system):

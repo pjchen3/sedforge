@@ -9,6 +9,7 @@ from astropy.table import Table
 
 from multiprocessing import cpu_count, get_context
 
+from sedforge._compat import trapezoid
 from sedforge import model, reddening, filters
 
 _WORKER_AVS = None
@@ -213,7 +214,7 @@ def _response_weight_matrix(wave, responses):
 
         trans = np.interp(int_wave, waver, transr, left=0, right=0)
         response_weight = filters.integration_weight(photband, int_wave)
-        denom = np.trapz(trans * response_weight, x=int_wave)
+        denom = trapezoid(trans * response_weight, x=int_wave)
         if denom <= 0 or not np.isfinite(denom):
             invalid.append(i)
             continue
