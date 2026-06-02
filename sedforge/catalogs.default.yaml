@@ -1,0 +1,181 @@
+# Built-in VizieR catalog set for `sedforge photometry`.
+#
+# Only these catalogs are queried. The output includes the fitting columns
+# photband mag mag_err system plus optional mag_type/mag_zp_offset and
+# internally converted flux check columns.
+catalogs:
+  - name: GaiaDR3
+    vizier_id: I/355/gaiadr3
+    quality_checks: true
+    source_id_column: Source
+    ra_column: [RA_ICRS, RAJ2000]
+    dec_column: [DE_ICRS, DEJ2000]
+    bands:
+      - photband: GAIA3E_G
+        mag: Gmag
+        mag_err: e_Gmag
+        system: vega
+      - photband: GAIA3E_BP
+        mag: BPmag
+        mag_err: e_BPmag
+        system: vega
+      - photband: GAIA3E_RP
+        mag: RPmag
+        mag_err: e_RPmag
+        system: vega
+
+  - name: 2MASS
+    vizier_id: II/246/out
+    quality_checks: true
+    ra_column: [RAJ2000, RA_ICRS]
+    dec_column: [DEJ2000, DE_ICRS]
+    bands:
+      - photband: 2MASS_J
+        mag: Jmag
+        mag_err: e_Jmag
+        system: vega
+      - photband: 2MASS_H
+        mag: Hmag
+        mag_err: e_Hmag
+        system: vega
+      - photband: 2MASS_Ks
+        mag: Kmag
+        mag_err: e_Kmag
+        system: vega
+
+  - name: AllWISE
+    vizier_id: II/328/allwise
+    quality_checks: true
+    ra_column: [RAJ2000, RA_ICRS]
+    dec_column: [DEJ2000, DE_ICRS]
+    bands:
+      - photband: WISE_RSR_W1
+        mag: W1mag
+        mag_err: e_W1mag
+        system: vega
+      - photband: WISE_RSR_W2
+        mag: W2mag
+        mag_err: e_W2mag
+        system: vega
+
+  - name: PanSTARRS1
+    vizier_id: II/349/ps1
+    quality_checks: true
+    ra_column: [RAJ2000, RA_ICRS]
+    dec_column: [DEJ2000, DE_ICRS]
+    bands:
+      - photband: PS1_g
+        mag: gmag
+        mag_err: e_gmag
+        system: ab
+      - photband: PS1_r
+        mag: rmag
+        mag_err: e_rmag
+        system: ab
+      - photband: PS1_i
+        mag: imag
+        mag_err: e_imag
+        system: ab
+      - photband: PS1_z
+        mag: zmag
+        mag_err: e_zmag
+        system: ab
+      - photband: PS1_y
+        mag: ymag
+        mag_err: e_ymag
+        system: ab
+
+  - name: SDSSDR12
+    vizier_id: V/147/sdss12
+    quality_checks: true
+    ra_column: [RA_ICRS, RAJ2000]
+    dec_column: [DE_ICRS, DEJ2000]
+    bands:
+      - photband: SDSS_u
+        mag: umag
+        mag_err: e_umag
+        system: ab
+        mag_type: asinh
+        mag_zp_offset: -0.04
+      - photband: SDSS_g
+        mag: gmag
+        mag_err: e_gmag
+        system: ab
+        mag_type: asinh
+      - photband: SDSS_r
+        mag: rmag
+        mag_err: e_rmag
+        system: ab
+        mag_type: asinh
+      - photband: SDSS_i
+        mag: imag
+        mag_err: e_imag
+        system: ab
+        mag_type: asinh
+      - photband: SDSS_z
+        mag: zmag
+        mag_err: e_zmag
+        system: ab
+        mag_type: asinh
+        mag_zp_offset: 0.02
+
+  - name: GLIMPSE
+    vizier_id: II/293/glimpse
+    quality_checks: true
+    ra_column: [RAJ2000, RA_ICRS]
+    dec_column: [DEJ2000, DE_ICRS]
+    bands:
+      - photband: SPITZER_IRAC_36
+        mag: _3.6mag
+        mag_err: e_3.6mag
+        system: vega
+      - photband: SPITZER_IRAC_45
+        mag: _4.5mag
+        mag_err: e_4.5mag
+        system: vega
+
+  - name: SkyMapperDR2
+    vizier_id: II/379
+    quality_checks: true
+    ra_column: [RAJ2000, RA_ICRS, RAICRS, raj2000]
+    dec_column: [DEJ2000, DE_ICRS, DEICRS, dej2000]
+    bands:
+      - photband: SkyMapper_u
+        mag: [u_psf, uPSF, u_psf_mag]
+        mag_err: [e_u_psf, e_uPSF, e_u_psf_mag]
+        system: ab
+      - photband: SkyMapper_v
+        mag: [v_psf, vPSF, v_psf_mag]
+        mag_err: [e_v_psf, e_vPSF, e_v_psf_mag]
+        system: ab
+      - photband: SkyMapper_g
+        mag: [g_psf, gPSF, g_psf_mag]
+        mag_err: [e_g_psf, e_gPSF, e_g_psf_mag]
+        system: ab
+      - photband: SkyMapper_r
+        mag: [r_psf, rPSF, r_psf_mag]
+        mag_err: [e_r_psf, e_rPSF, e_r_psf_mag]
+        system: ab
+      - photband: SkyMapper_i
+        mag: [i_psf, iPSF, i_psf_mag]
+        mag_err: [e_i_psf, e_iPSF, e_i_psf_mag]
+        system: ab
+      - photband: SkyMapper_z
+        mag: [z_psf, zPSF, z_psf_mag]
+        mag_err: [e_z_psf, e_zPSF, e_z_psf_mag]
+        system: ab
+
+  - name: GALEXAIS
+    vizier_id: II/312/ais
+    quality_checks: true
+    ra_column: [RAJ2000, RA_ICRS]
+    dec_column: [DEJ2000, DE_ICRS]
+    bands:
+      - photband: GALEX_FUV
+        mag: FUV
+        mag_err: e_FUV
+        system: ab
+      - photband: GALEX_NUV
+        mag: NUV
+        mag_err: e_NUV
+        system: ab

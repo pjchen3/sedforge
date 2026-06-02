@@ -1,0 +1,58 @@
+# macOS / editor noise
+.DS_Store
+._*
+*.swp
+*~
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Local run outputs
+observations.txt
+runs/
+tmp/
+scratch/
+*_results.csv
+*_samples.fits
+*_sed.png
+*_corner.png
+*_distribution.png
+*_observations.txt
+*_recovery_summary.dat
+*_photometry_with_truth.dat
+
+# Large local model products should be distributed separately.
+sed_models/
+Models_Dir/
+models/
+*.fits
+*.h5
+*.hdf5
+*.log
+
+# Keep package data files tracked.
+!sedforge/filter_info.dat
+!sedforge/vega.dat
+!sedforge/transmission_curves/*.dat

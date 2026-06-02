@@ -1,0 +1,17 @@
+include README.md
+include LICENSE
+include CITATION.cff
+include pyproject.toml
+include sedforge/filter_info.dat
+include sedforge/filter_svo_map.dat
+include sedforge/vega.dat
+include sedforge/catalogs.example.yaml
+include sedforge/catalogs.default.yaml
+recursive-include sedforge/transmission_curves *.dat
+recursive-include sedforge/tests *.py
+recursive-include scripts *.py
+
+prune .pytest_cache
+prune build
+prune dist
+global-exclude __pycache__ *.py[cod] .DS_Store ._*

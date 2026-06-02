@@ -1,0 +1,67 @@
+# Example VizieR catalog configuration for `sedforge photometry`.
+#
+# Only catalogs listed here are queried. Adjust catalog IDs, column names, and
+# photband names to match the filters available in sedforge/transmission_curves.
+catalogs:
+  - name: GaiaDR3
+    vizier_id: I/355/gaiadr3
+    source_id_column: Source
+    ra_column: RA_ICRS
+    dec_column: DE_ICRS
+    bands:
+      - photband: GAIA3E_G
+        mag: Gmag
+        mag_err: e_Gmag
+        system: vega
+      - photband: GAIA3E_BP
+        mag: BPmag
+        mag_err: e_BPmag
+        system: vega
+      - photband: GAIA3E_RP
+        mag: RPmag
+        mag_err: e_RPmag
+        system: vega
+
+  - name: 2MASS
+    vizier_id: II/246/out
+    ra_column: RAJ2000
+    dec_column: DEJ2000
+    bands:
+      - photband: 2MASS_J
+        mag: Jmag
+        mag_err: e_Jmag
+        system: vega
+      - photband: 2MASS_H
+        mag: Hmag
+        mag_err: e_Hmag
+        system: vega
+      - photband: 2MASS_Ks
+        mag: Kmag
+        mag_err: e_Kmag
+        system: vega
+
+  - name: PanSTARRS1
+    vizier_id: II/349/ps1
+    ra_column: RAJ2000
+    dec_column: DEJ2000
+    bands:
+      - photband: PS1_g
+        mag: gmag
+        mag_err: e_gmag
+        system: ab
+      - photband: PS1_r
+        mag: rmag
+        mag_err: e_rmag
+        system: ab
+      - photband: PS1_i
+        mag: imag
+        mag_err: e_imag
+        system: ab
+      - photband: PS1_z
+        mag: zmag
+        mag_err: e_zmag
+        system: ab
+      - photband: PS1_y
+        mag: ymag
+        mag_err: e_ymag
+        system: ab

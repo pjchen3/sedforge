@@ -1,0 +1,62 @@
+cff-version: 1.2.0
+message: "If you use sedforge in published research, please cite this software and the model grids, filter curves, catalogs, and extinction law used in your analysis."
+title: "sedforge: Flux-based photometric SED fitting for stellar astronomy"
+version: "0.2.5"
+date-released: "2026-06-02"
+license: "GPL-3.0-only"
+authors:
+  - name: "SED-fit contributors"
+references:
+  - type: software
+    title: "Speedyfit"
+    authors:
+      - given-names: "Joris"
+        family-names: "Vos"
+    repository-code: "https://github.com/vosjo/speedyfit"
+  - type: article
+    title: "The orbits of subdwarf-B + main-sequence binaries. III. The period-eccentricity distribution"
+    authors:
+      - given-names: "Joris"
+        family-names: "Vos"
+      - given-names: "Roy H."
+        family-names: "Ostensen"
+      - given-names: "Maja"
+        family-names: "Vuckovic"
+      - given-names: "Hans"
+        family-names: "Van Winckel"
+    journal: "Astronomy & Astrophysics"
+    volume: "605"
+    number: "A109"
+    year: 2017
+    doi: "10.1051/0004-6361/201730958"
+  - type: article
+    title: "Composite hot subdwarf binaries - I. The spectroscopically confirmed sdB sample"
+    authors:
+      - given-names: "Joris"
+        family-names: "Vos"
+      - given-names: "Peter"
+        family-names: "Nemeth"
+      - given-names: "Maja"
+        family-names: "Vuckovic"
+      - given-names: "Roy"
+        family-names: "Ostensen"
+      - given-names: "Steven"
+        family-names: "Parsons"
+    journal: "Monthly Notices of the Royal Astronomical Society"
+    volume: "473"
+    start: 693
+    end: 709
+    year: 2018
+    doi: "10.1093/mnras/stx2198"
+  - type: article
+    title: "The Optical to Mid-infrared Extinction Law Based on the APOGEE, Gaia DR2, Pan-STARRS1, SDSS, APASS, 2MASS, and WISE Surveys"
+    authors:
+      - given-names: "Shu"
+        family-names: "Wang"
+      - given-names: "Xiaodian"
+        family-names: "Chen"
+    journal: "The Astrophysical Journal"
+    volume: "877"
+    number: "116"
+    year: 2019
+    doi: "10.3847/1538-4357/ab1c61"
