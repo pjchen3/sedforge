@@ -68,9 +68,6 @@ sed_models/
 `integrated/`，以及必要 `spectral_cache/` 或 HDF5 网格目录的 `sed_models/`
 目录，然后把 `SEDFORGE_MODELS` 指向该目录。
 
-大型模型网格不应提交到 GitHub。建议把它们保存在本地、服务器或数据仓库中，
-并在论文或 README 中说明生成方式和下载位置。
-
 ## 快速开始
 
 先创建一个星等光度文件，必须包含以下列：
