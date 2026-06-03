@@ -239,8 +239,6 @@ such as `teff`, `logg`, `av`, optionally `feh`, plus one flux column per
 filter. A `Labs` column stores bolometric luminosity information used by the
 fit output.
 
-### Supported Spectral Models
-
 The current sedforge model configuration supports these spectral model
 families. The large grid files are kept outside the Git repository and should
 be downloaded from a data release or generated locally.

@@ -182,8 +182,6 @@ sedforge photometry \
 可选 `feh`，以及每个滤光片的一列 flux。`Labs` 列存储拟合输出中使用的
 bolometric luminosity 信息。
 
-### 当前支持的光谱模型
-
 当前 sedforge 的模型配置支持以下光谱模型 family。大型网格文件不会提交到
 Git 仓库中，应从数据发布页面下载，或由用户在本地自行生成。
 
