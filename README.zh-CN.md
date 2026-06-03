@@ -176,6 +176,35 @@ sedforge photometry \
 可选 `feh`，以及每个滤光片的一列 flux。`Labs` 列存储拟合输出中使用的
 bolometric luminosity 信息。
 
+### 当前支持的光谱模型
+
+当前 sedforge 的模型配置支持以下光谱模型 family。大型网格文件不会提交到
+Git 仓库中，应从数据发布页面下载，或由用户在本地自行生成。
+
+- Castelli & Kurucz 2003：包括 `ckm25`、`ckm20`、`ckm15`、`ckm10`、
+  `ckm05`、`ckp00`、`ckp02`、`ckp05`，以及合并后的 `ck_all`
+  金属丰度 stack；Cepheid 相关工作还可以使用带显式 `Rv` 和 `Av` 轴的
+  HDF5 网格 `ck03_cepheid_rv`。
+- TLUSTY/SYNSPEC 热星模型：包括 `tlusty00`、`tlusty01`、`tlusty02`、
+  `tlusty05`、`tlusty10`、`tlusty20` 和 `tlusty_all`；非零金属丰度
+  stack 中使用 `feh = log10(Z/Zsun)`。
+- PHOENIX NewEra V3 LowRes alpha=0 光谱：对应 `newera_alpha0`，带真实
+  `[Fe/H]` 网格轴。
+- Koester DA 白矮星光谱：对应 `koester2`。
+- TMAP H+He 光谱：对应 `tmap_he000` 到 `tmap_he100`，每个网格使用固定
+  helium mass fraction。
+- Disc-integrated blackbody 网格：对应 `blackbody`，用于简单连续谱组分。
+
+sedforge 并不只限于这些模型。用户可以根据自己的科学目标，把新的 atmosphere
+或 spectrum library 用同一套滤光片响应曲线和消光律进行卷积，然后把生成的
+积分网格加入 `grid_description.yaml`。自定义积分网格应遵守与内置网格相同的
+格式约定：包含 `teff`、`logg`、`av` 等模型轴列以及可选物理参数轴；每个
+滤光片一列 band-averaged `Flambda`；如果需要输出 luminosity，则提供 `Labs`
+列；如果希望绘图显示连续光谱，则提供可选的 `spectral_cache` FITS 文件，其中
+波长单位为 Angstrom，通量单位为 `erg/s/cm2/Angstrom`。如果新的网格名称没有
+覆盖在当前内置 setup 默认范围里，应在 setup 文件中显式给出合适的参数范围，
+或在运行拟合前扩展包内默认设置。
+
 模型目录由 `grid_description.yaml` 描述。一个固定金属丰度网格示例：
 
 ```yaml

@@ -232,6 +232,38 @@ such as `teff`, `logg`, `av`, optionally `feh`, plus one flux column per
 filter. A `Labs` column stores bolometric luminosity information used by the
 fit output.
 
+### Supported Spectral Models
+
+The current sedforge model configuration supports these spectral model
+families. The large grid files are kept outside the Git repository and should
+be downloaded from a data release or generated locally.
+
+- Castelli & Kurucz 2003 (`ckm25`, `ckm20`, `ckm15`, `ckm10`, `ckm05`,
+  `ckp00`, `ckp02`, `ckp05`, and the combined `ck_all` stack), including the
+  HDF5 `ck03_cepheid_rv` grid with explicit `Rv` and `Av` axes for Cepheid
+  work.
+- TLUSTY/SYNSPEC hot-star grids (`tlusty00`, `tlusty01`, `tlusty02`,
+  `tlusty05`, `tlusty10`, `tlusty20`, and `tlusty_all`), with
+  `feh = log10(Z/Zsun)` for the non-zero metallicity stack.
+- PHOENIX NewEra V3 LowRes alpha=0 spectra (`newera_alpha0`), represented as
+  a grid with a real `[Fe/H]` axis.
+- Koester DA white-dwarf spectra (`koester2`).
+- TMAP H+He spectra (`tmap_he000` through `tmap_he100`) with fixed helium mass
+  fraction.
+- A disc-integrated blackbody grid (`blackbody`) for simple continuum
+  components.
+
+sedforge is not limited to these model families. Users can convolve a new
+atmosphere or spectrum library with the same filter response curves and
+extinction law, then add the resulting grid to `grid_description.yaml`. A
+custom integrated grid should use the same contract as the built-in grids:
+model-axis columns such as `teff`, `logg`, `av`, and optional physical axes;
+one band-averaged `Flambda` column per filter; a `Labs` column when luminosity
+output is needed; and, for plotting, an optional `spectral_cache` FITS file
+with wavelength in Angstrom and flux in `erg/s/cm2/Angstrom`. If a new grid
+name is not covered by the built-in setup defaults, provide suitable parameter
+ranges in the setup file or extend the package defaults before running fits.
+
 The model directory is described by `grid_description.yaml`. A fixed-metallicity
 grid can be described like this:
 
