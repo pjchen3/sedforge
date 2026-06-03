@@ -73,6 +73,13 @@ sed_models/
   spectral_cache/   # continuous spectra used only for plotting
 ```
 
+Prepared model grid archives are available from Zenodo:
+[doi:10.5281/zenodo.20520723](https://doi.org/10.5281/zenodo.20520723).
+Download the archives you need, unpack them so that the `sed_models/`
+directory contains `grid_description.yaml`, `integrated/`, and any required
+`spectral_cache/` or HDF5 grid directories, then point `SEDFORGE_MODELS` to
+that directory.
+
 ## Quick Start
 
 Create a magnitude photometry file with the required fitting columns:
@@ -304,8 +311,12 @@ newera_alpha0:
   info: PHOENIX NewEra alpha=0 integrated grid
 ```
 
-Large model grids should not be committed to GitHub. Keep them in a local or
-server-side `sed_models` directory and document how they were generated.
+Large model grids should not be committed to GitHub. The prepared sedforge
+model-grid release is archived on Zenodo:
+[doi:10.5281/zenodo.20520723](https://doi.org/10.5281/zenodo.20520723).
+For new or modified grids, keep the files in a local or server-side
+`sed_models` directory, document how they were generated, and publish large
+artifacts through a data repository rather than Git history.
 
 ### Raw Spectrum Cache For Plotting
 
@@ -770,6 +781,8 @@ and the related Speedyfit science papers:
 Also cite the model atmosphere grids, filter curves/catalogs, and extinction
 law used for the integrated grids. For example, a paper should document:
 
+- the prepared sedforge model-grid release if those archives are used:
+  [doi:10.5281/zenodo.20520723](https://doi.org/10.5281/zenodo.20520723);
 - the model family and grid release, such as Castelli & Kurucz, PHOENIX/NewEra,
   TLUSTY, Koester, TMAP, or blackbody grids;
 - the source of filter response curves, such as the SVO Filter Profile Service;

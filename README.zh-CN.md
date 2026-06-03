@@ -62,8 +62,14 @@ sed_models/
   spectral_cache/   # 只用于绘图的连续光谱缓存
 ```
 
-大型模型网格不应提交到 GitHub。建议把它们保存在本地、服务器、GitHub
-Releases、Zenodo 或 Figshare，并在论文或 README 中说明生成方式和下载位置。
+预构建的模型网格文件已发布在 Zenodo：
+[doi:10.5281/zenodo.20520723](https://doi.org/10.5281/zenodo.20520723)。
+按需要下载对应 archive，解压后应得到包含 `grid_description.yaml`、
+`integrated/`，以及必要 `spectral_cache/` 或 HDF5 网格目录的 `sed_models/`
+目录，然后把 `SEDFORGE_MODELS` 指向该目录。
+
+大型模型网格不应提交到 GitHub。建议把它们保存在本地、服务器或数据仓库中，
+并在论文或 README 中说明生成方式和下载位置。
 
 ## 快速开始
 
@@ -488,6 +494,8 @@ sedforge 派生自 Joris Vos 的原始
 还应引用分析中实际使用的模型大气网格、滤光片响应曲线/catalogs 和消光律。
 例如论文中应说明：
 
+- 如果使用了预构建的 sedforge 模型网格 archive，请引用
+  [doi:10.5281/zenodo.20520723](https://doi.org/10.5281/zenodo.20520723)；
 - 模型 family 和 grid release，例如 Castelli & Kurucz、PHOENIX/NewEra、
   TLUSTY、Koester、TMAP 或 blackbody grids；
 - 滤光片响应曲线来源，例如 SVO Filter Profile Service；
