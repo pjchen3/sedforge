@@ -5,19 +5,13 @@
   <a href="README.zh-CN.md"><img src="https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-README-c2410c" alt="简体中文 README"></a>
 </p>
 
-sedforge 是一个用于恒星光度 SED（spectral energy distribution）拟合的
-Python 包。它以绝对通量为拟合对象，使用 MCMC 采样，支持单星、未分辨双星
-和未分辨三组分系统。
+sedforge 是一个用于恒星光度 SED（spectral energy distribution）拟合的Python 包。它以绝对通量为拟合对象，使用 MCMC 采样，支持单星、未分辨双星和未分辨三组分系统。
 
-本项目是 [Speedyfit](https://github.com/vosjo/speedyfit) 的科研 fork。
-在原始 Speedyfit 的基础上，sedforge 对输入文件、模型网格、消光轴、绘图、
-catalog photometry helper 等做了较多调整，以适配下面描述的
-“星等输入优先”的工作流。
+本项目是 [Speedyfit](https://github.com/vosjo/speedyfit) 的科研 fork。在原始 Speedyfit 的基础上，sedforge 对输入文件、模型网格、消光轴、绘图、catalog photometry helper 等做了较多调整，以适配下面描述的“星等输入优先”的工作流。
 
 主要特性：
 
-- 从简单的 `photband mag mag_err system` 光度表读取观测数据，并在内部转换为
-  与模型网格一致的 band-averaged `Flambda`；
+- 从简单的 `photband mag mag_err system` 光度表读取观测数据，并在内部转换为与模型网格一致的 band-averaged `Flambda`；
 - `distance` 是以 parsec 为单位的物理拟合参数或固定参数；
 - 当积分模型网格提供 `[Fe/H]` 轴时，可以把金属丰度作为真实网格轴拟合；
 - 任意模型参数都可以通过 YAML 中的 `fixed:` 部分固定；
@@ -143,7 +137,7 @@ parameters，并反解 asinh magnitude。若你的 SDSS 数据已经转成普通
 选择器支持 family prefix，例如 `GAIA3E` 会匹配 `GAIA3E_G`、`GAIA3E_BP` 和
 `GAIA3E_RP`。
 
-## 从 VizieR 下载光度
+## 从 VizieR 下载星等
 
 安装 photometry extra 后，可以用坐标或 Gaia DR3 source id 从配置好的
 VizieR catalogs 生成光度表。默认配置包括：
