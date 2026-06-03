@@ -16,8 +16,9 @@ sedforge 是一个用于恒星光度 SED（spectral energy distribution）拟合
 - 当积分模型网格提供 `[Fe/H]` 轴时，可以把金属丰度作为真实网格轴拟合；
 - 任意模型参数都可以通过 YAML 中的 `fixed:` 部分固定；
 - 构建积分网格时，先在每个波长点应用消光，再通过滤光片响应曲线积分；
-- 内置滤光片响应曲线来自 SVO Filter Profile Service，并在
-  `filter_info.dat` 中记录 photon/energy response convention；
+- 内置滤光片响应曲线来自
+  [SVO Filter Profile Service](https://svo2.cab.inta-csic.es/theory/fps/)，
+  并在 `filter_info.dat` 中记录 photon/energy response convention；
 - 默认消光律为 `WC2019`，默认 `case1=1`。
 
 本 fork 继承原 Speedyfit 的 GPLv3 license。公开发布或再分发时，请保留
@@ -282,7 +283,8 @@ reddening_case1: 1
 Cepheid 相关工作可以使用特殊 HDF5 网格 `ck03_cepheid_rv`，该网格有显式
 `rv` 轴。此时可以把 `rv` 作为拟合参数，或在 `fixed:` 中固定。
 
-内置滤光片曲线由 `filter_svo_map.dat` 和 SVO Filter Profile Service 生成。
+内置滤光片曲线由 `filter_svo_map.dat` 和
+[SVO Filter Profile Service](https://svo2.cab.inta-csic.es/theory/fps/) 生成。
 `filter_info.dat` 记录 SVO id 和本地 `response_type`：photon response 在合成
 photometry 中使用额外波长权重，energy response 不使用额外波长权重。SVO 的
 WISE 和 Spitzer/IRAC 曲线是 energy responses。
@@ -492,8 +494,11 @@ sedforge 派生自 Joris Vos 的原始
 - 如果使用了预构建的 sedforge 模型网格 archive，请引用
   [doi:10.5281/zenodo.20520723](https://doi.org/10.5281/zenodo.20520723)；
 - 模型 family 和 grid release，例如 Castelli & Kurucz、PHOENIX/NewEra、
-  TLUSTY、Koester、TMAP 或 blackbody grids；
-- 滤光片响应曲线来源，例如 SVO Filter Profile Service；
+  TLUSTY、Koester、TMAP 或 blackbody grids，并引用实际使用的每个光谱模型
+  family 对应的原始论文或模型网格文档；
+- 滤光片响应曲线来源，例如
+  [SVO Filter Profile Service](https://svo2.cab.inta-csic.es/theory/fps/)，
+  并按该服务的 acknowledgement 和 citation 说明引用；
 - 查询的 photometry catalogs，例如 Gaia DR3、2MASS、AllWISE、PS1、SDSS、
   GLIMPSE、SkyMapper 或 GALEX；
 - 消光律和参数，例如 `WC2019`、`Rv` 和 `case1`。对于内置 WC2019 law，请引用

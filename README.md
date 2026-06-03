@@ -25,7 +25,8 @@ This fork has been adapted for a magnitude-first workflow:
 - any model parameter can be fixed through a readable `fixed:` setup section;
 - integrated grids are built by applying extinction wavelength-by-wavelength
   before filter convolution;
-- bundled filter response curves are taken from the SVO Filter Profile Service,
+- bundled filter response curves are taken from the
+  [SVO Filter Profile Service](https://svo2.cab.inta-csic.es/theory/fps/),
   with photon/energy response conventions recorded in `filter_info.dat`;
 - the default extinction law is `WC2019` with `case1=1`.
 
@@ -403,8 +404,9 @@ Only filters fully covered by the model wavelength range should be used for a
 grid. Filter metadata such as effective wavelength and bandwidth can be stored
 in `filter_info.dat` for plotting.
 
-Bundled response curves are generated from `filter_svo_map.dat` using the SVO
-Filter Profile Service. `filter_info.dat` records the SVO id and the local
+Bundled response curves are generated from `filter_svo_map.dat` using the
+[SVO Filter Profile Service](https://svo2.cab.inta-csic.es/theory/fps/).
+`filter_info.dat` records the SVO id and the local
 `response_type`: photon responses use an extra wavelength weight in synthetic
 photometry, while energy responses use no extra wavelength weight. SVO WISE and
 Spitzer/IRAC curves are energy responses.
@@ -782,8 +784,11 @@ law used for the integrated grids. For example, a paper should document:
 - the prepared sedforge model-grid release if those archives are used:
   [doi:10.5281/zenodo.20520723](https://doi.org/10.5281/zenodo.20520723);
 - the model family and grid release, such as Castelli & Kurucz, PHOENIX/NewEra,
-  TLUSTY, Koester, TMAP, or blackbody grids;
-- the source of filter response curves, such as the SVO Filter Profile Service;
+  TLUSTY, Koester, TMAP, or blackbody grids, and the corresponding original
+  papers or model-grid documentation for each spectral model family used;
+- the source of filter response curves, such as the
+  [SVO Filter Profile Service](https://svo2.cab.inta-csic.es/theory/fps/),
+  following the service's acknowledgement and citation guidance;
 - the photometry catalogs queried, such as Gaia DR3, 2MASS, AllWISE, PS1, SDSS,
   GLIMPSE, SkyMapper, or GALEX;
 - the extinction law and parameters, such as `WC2019`, `Rv`, and `case1`.
