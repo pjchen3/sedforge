@@ -162,6 +162,13 @@ HST filters do not have a default because the same passband can be reported as
 VegaMag, ABMag, or STMag. Provide `system: vega` or `system: ab` explicitly for
 HST photometry. STMag input is not currently supported.
 
+The bundled filter set currently covers the instrument families and wavelength
+ranges shown below. Use the exact `photband` names from
+`sedforge/transmission_curves`; the figure summarizes filter coverage by
+instrument.
+
+![sedforge supported photometric filters](docs/assets/sedforge_supported_filters_by_instrument.png)
+
 AB and Vega zero points are computed by integrating the AB reference spectrum
 or `vega.dat` through the same local response curve used for model convolution.
 The optional `mag_type` column can be `pogson` or `asinh`; if omitted, SDSS
@@ -278,6 +285,12 @@ be downloaded from a data release or generated locally.
   fraction.
 - A disc-integrated blackbody grid (`blackbody`) for simple continuum
   components.
+
+The current prepared model-grid coverage in effective temperature and surface
+gravity is summarized below. Exact axes, metallicity coverage, and file paths
+are defined by `grid_description.yaml` and the released grid files.
+
+![sedforge model grid coverage](docs/assets/model_teff_logg_shaded_grid.png)
 
 sedforge is not limited to these model families. Users can convolve a new
 atmosphere or spectrum library with the same filter response curves and

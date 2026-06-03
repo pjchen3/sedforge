@@ -149,6 +149,12 @@ HST 滤光片没有默认系统，因为同一 passband 可能用 VegaMag、ABMa
 报告。HST photometry 应显式提供 `system: vega` 或 `system: ab`。当前不支持
 STMag 输入。
 
+下图概括了当前内置滤光片按 instrument family 的波长覆盖。实际输入时仍应使用
+`sedforge/transmission_curves` 中的精确 `photband` 名称；图中展示的是按
+instrument 汇总后的覆盖范围。
+
+![sedforge 支持的光度滤光片](docs/assets/sedforge_supported_filters_by_instrument.png)
+
 SDSS catalog magnitudes 是 luptitudes/asinh magnitudes，因此 sedforge 不用
 高信噪比 Pogson 近似直接转换。对于 `SDSS_u/g/r/i/z`，代码使用 SDSS softening
 parameters，并反解 asinh magnitude。若你的 SDSS 数据已经转成普通 AB/Pogson
@@ -214,6 +220,12 @@ Git 仓库中，应从数据发布页面下载，或由用户在本地自行生�
 - TMAP H+He 光谱：对应 `tmap_he000` 到 `tmap_he100`，每个网格使用固定
   helium mass fraction。
 - Disc-integrated blackbody 网格：对应 `blackbody`，用于简单连续谱组分。
+
+下图概括了当前预构建模型网格在有效温度和表面重力空间中的覆盖范围。精确的
+网格轴、金属丰度覆盖和文件路径仍以 `grid_description.yaml` 以及发布的网格
+文件为准。
+
+![sedforge 模型网格覆盖范围](docs/assets/model_teff_logg_shaded_grid.png)
 
 sedforge 并不只限于这些模型。用户可以根据自己的科学目标，把新的 atmosphere
 或 spectrum library 用同一套滤光片响应曲线和消光律进行卷积，然后把生成的
