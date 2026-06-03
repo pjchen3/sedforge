@@ -35,10 +35,11 @@ published or redistributed, keep the GPLv3 license and the original attribution.
 
 ## Installation
 
-sedforge requires Python 3.9 or newer. For normal use, install the package from
-the repository root:
+sedforge requires Python 3.9 or newer. Clone the repository, enter the
+repository root, and install the package:
 
 ```bash
+git clone https://github.com/pjchen3/sedforge.git
 cd sedforge
 python -m pip install .
 ```
@@ -49,7 +50,9 @@ For development, install the package in editable mode with test/build tools:
 python -m pip install -e ".[dev]"
 ```
 
-Optional extras keep non-core dependencies out of the default install:
+Optional extras keep non-core dependencies out of the default install. Run
+these commands from the same repository root only when you need the matching
+feature:
 
 ```bash
 python -m pip install ".[photometry]"  # VizieR catalog downloads with astroquery
@@ -57,7 +60,17 @@ python -m pip install ".[svo]"         # SVO filter update helper
 python -m pip install ".[hdf5]"        # HDF5 model grids
 ```
 
-The model grid directory is selected with `SEDFORGE_MODELS`:
+The source code does not include the large model grids. Prepared model grid
+archives are available from Zenodo:
+[doi:10.5281/zenodo.20520723](https://doi.org/10.5281/zenodo.20520723).
+For the `ck_all` Quick Start below, download at least the integrated-grid
+archive. Download the spectral-cache archive too if you want SED plots with
+continuous model spectra. Download the `ck03_cepheid_rv` HDF5 archive only if
+you plan to use that Cepheid `Rv` grid.
+
+Unpack the archives in the same parent directory so that they merge into one
+`sed_models/` directory. The model grid directory is selected with
+`SEDFORGE_MODELS`:
 
 ```bash
 export SEDFORGE_MODELS=/path/to/sed_models
@@ -74,16 +87,12 @@ sed_models/
   spectral_cache/   # continuous spectra used only for plotting
 ```
 
-Prepared model grid archives are available from Zenodo:
-[doi:10.5281/zenodo.20520723](https://doi.org/10.5281/zenodo.20520723).
-Download the archives you need, unpack them so that the `sed_models/`
-directory contains `grid_description.yaml`, `integrated/`, and any required
-`spectral_cache/` or HDF5 grid directories, then point `SEDFORGE_MODELS` to
-that directory.
-
 ## Quick Start
 
-Create a magnitude photometry file with the required fitting columns:
+This example uses target name `my_target` and model grid `ck_all`.
+
+Create a magnitude photometry file named `my_target.phot` in your working
+directory. It must contain these columns:
 
 ```text
 photband  mag    mag_err  system
@@ -97,16 +106,27 @@ the integrated grids. The `photband` names must match bundled response curves
 such as `GAIA3E_G`, `2MASS_Ks`, `WISE_RSR_W1`, `HST_WFC3_F814W`, or another
 band in `sedforge/transmission_curves`.
 
-Create a starter setup file and run a fit:
+Create a starter setup file for target `my_target` and grid `ck_all`:
 
 ```bash
 sedforge setup my_target -grid ck_all
+```
+
+This command writes `my_target_setup_ck_all.yaml`. By default, that setup file
+expects the photometry file `my_target.phot` beside the setup file unless you
+edit the generated YAML.
+
+Run the fit with the generated setup file:
+
+```bash
 sedforge fit my_target_setup_ck_all.yaml --noplot
 ```
 
-The fit expects `my_target.phot` beside the setup file unless you edit the
-generated YAML. Outputs include a CSV result summary, accepted MCMC samples in
-FITS format, an SED plot, and a corner plot.
+The `--noplot` option skips SED and corner plots, so the Quick Start can run
+with only the integrated-grid archive. If you also unpacked the spectral-cache
+archive, omit `--noplot` to create the plots. Outputs include a CSV result
+summary, accepted MCMC samples in FITS format, and, when plotting is enabled,
+an SED plot and a corner plot.
 
 ## Photometry Input
 

@@ -26,9 +26,11 @@ GPLv3 license 和原始 attribution。
 
 ## 安装
 
-sedforge 需要 Python 3.9 或更新版本。在仓库根目录下安装：
+sedforge 需要 Python 3.9 或更新版本。先 clone GitHub 仓库，进入仓库根目录，
+再安装 package：
 
 ```bash
+git clone https://github.com/pjchen3/sedforge.git
 cd sedforge
 python -m pip install .
 ```
@@ -39,7 +41,8 @@ python -m pip install .
 python -m pip install -e ".[dev]"
 ```
 
-可选依赖被放在 extras 中，避免把非核心依赖装进默认环境：
+可选依赖被放在 extras 中，避免把非核心依赖装进默认环境。下面的命令都应在
+同一个仓库根目录下运行，只在需要对应功能时安装：
 
 ```bash
 python -m pip install ".[photometry]"  # 使用 astroquery 下载 VizieR photometry
@@ -47,7 +50,15 @@ python -m pip install ".[svo]"         # 更新 SVO 滤光片曲线的辅助脚�
 python -m pip install ".[hdf5]"        # HDF5 模型网格支持
 ```
 
-模型网格目录通过环境变量 `SEDFORGE_MODELS` 指定：
+代码仓库不包含大型模型网格。预构建的模型网格文件已发布在 Zenodo：
+[doi:10.5281/zenodo.20520723](https://doi.org/10.5281/zenodo.20520723)。
+如果只运行下面 `ck_all` 的 Quick Start，至少需要下载 integrated-grid archive。
+如果希望生成带连续模型光谱的 SED 图，还需要下载 spectral-cache archive。
+只有在使用 Cepheid `Rv` 网格 `ck03_cepheid_rv` 时，才需要下载对应的 HDF5
+archive，并安装 `hdf5` extra。
+
+把需要的 archive 解压到同一个上级目录中，让它们合并成同一个 `sed_models/`
+目录。模型网格目录通过环境变量 `SEDFORGE_MODELS` 指定：
 
 ```bash
 export SEDFORGE_MODELS=/path/to/sed_models
@@ -63,15 +74,12 @@ sed_models/
   spectral_cache/   # 只用于绘图的连续光谱缓存
 ```
 
-预构建的模型网格文件已发布在 Zenodo：
-[doi:10.5281/zenodo.20520723](https://doi.org/10.5281/zenodo.20520723)。
-按需要下载对应 archive，解压后应得到包含 `grid_description.yaml`、
-`integrated/`，以及必要 `spectral_cache/` 或 HDF5 网格目录的 `sed_models/`
-目录，然后把 `SEDFORGE_MODELS` 指向该目录。
-
 ## 快速开始
 
-先创建一个星等光度文件，必须包含以下列：
+这个示例使用目标名 `my_target` 和模型网格 `ck_all`。
+
+先在当前工作目录下创建一个名为 `my_target.phot` 的星等光度文件。这个文件必须
+包含以下列：
 
 ```text
 photband  mag    mag_err  system
@@ -84,19 +92,29 @@ PS1_g     18.42  0.02     ab
 `2MASS_Ks`、`WISE_RSR_W1`、`HST_WFC3_F814W`，或
 `sedforge/transmission_curves` 中的其他波段。
 
-生成一个起始 setup 文件并运行拟合：
+为目标 `my_target` 和网格 `ck_all` 生成一个起始 setup 文件：
 
 ```bash
 sedforge setup my_target -grid ck_all
+```
+
+这个命令会生成 `my_target_setup_ck_all.yaml`。默认情况下，这个 setup 文件会在
+同一目录下寻找输入光度文件 `my_target.phot`；如果想用其他文件名或路径，需要
+编辑生成的 YAML。
+
+然后用生成的 setup 文件运行拟合：
+
+```bash
 sedforge fit my_target_setup_ck_all.yaml --noplot
 ```
 
-默认情况下，拟合会在 setup 文件旁边寻找 `my_target.phot`。输出通常包括：
+这里的 `--noplot` 会跳过 SED 图和 corner plot，因此只下载 integrated-grid
+archive 也可以运行这个快速示例。如果已经解压了 spectral-cache archive，可以
+去掉 `--noplot` 来生成图。输出通常包括：
 
 - 一行 CSV 拟合结果摘要；
 - FITS 格式的 accepted MCMC samples；
-- SED 拟合图；
-- posterior corner plot。
+- 启用绘图时，还会生成 SED 拟合图和 posterior corner plot。
 
 ## 光度输入格式
 
