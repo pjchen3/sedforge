@@ -1,6 +1,9 @@
 # sedforge
 
-[简体中文 README](README.zh-CN.md)
+<p align="right">
+  <a href="README.md"><img src="https://img.shields.io/badge/English-README-2563eb" alt="English README"></a>
+  <a href="README.zh-CN.md"><img src="https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-README-c2410c" alt="简体中文 README"></a>
+</p>
 
 sedforge is a Python package for fitting stellar photometric spectral energy
 distributions (SEDs). It fits absolute fluxes with MCMC and supports single,

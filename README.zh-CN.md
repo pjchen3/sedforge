@@ -1,6 +1,9 @@
 # sedforge
 
-[English README](README.md)
+<p align="right">
+  <a href="README.md"><img src="https://img.shields.io/badge/English-README-2563eb" alt="English README"></a>
+  <a href="README.zh-CN.md"><img src="https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-README-c2410c" alt="简体中文 README"></a>
+</p>
 
 sedforge 是一个用于恒星光度 SED（spectral energy distribution）拟合的
 Python 包。它以绝对通量为拟合对象，使用 MCMC 采样，支持单星、未分辨双星
