@@ -128,6 +128,18 @@ archive, omit `--noplot` to create the plots. Outputs include a CSV result
 summary, accepted MCMC samples in FITS format, and, when plotting is enabled,
 an SED plot and a corner plot.
 
+Example output from a synthetic `ck_all` recovery is shown below. The first
+figure shows the fitted SED, and the second shows the corresponding MCMC
+posterior corner plot.
+
+<p align="center">
+  <img src="docs/assets/example_synthetic_ck_all_sedfit.png" alt="Example synthetic ck_all SED fit" width="720">
+</p>
+
+<p align="center">
+  <img src="docs/assets/example_synthetic_ck_all_mcmc_posterior.png" alt="Example synthetic ck_all MCMC posterior corner plot" width="720">
+</p>
+
 ## Photometry Input
 
 Photometry files must contain these columns:

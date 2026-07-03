@@ -116,6 +116,17 @@ archive 也可以运行这个快速示例。如果已经解压了 spectral-cache
 - FITS 格式的 accepted MCMC samples；
 - 启用绘图时，还会生成 SED 拟合图和 posterior corner plot。
 
+下面是一个 synthetic `ck_all` recovery 的示例输出。第一张图是 SED 拟合结果，
+第二张图是对应的 MCMC posterior corner plot。
+
+<p align="center">
+  <img src="docs/assets/example_synthetic_ck_all_sedfit.png" alt="synthetic ck_all SED 拟合示例" width="720">
+</p>
+
+<p align="center">
+  <img src="docs/assets/example_synthetic_ck_all_mcmc_posterior.png" alt="synthetic ck_all MCMC posterior corner plot 示例" width="720">
+</p>
+
 ## 光度输入格式
 
 推荐输入格式为星等表：
