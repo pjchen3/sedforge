@@ -232,9 +232,10 @@ Git 仓库中，应从数据发布页面下载，或由用户在本地自行生�
   helium mass fraction。
 - Disc-integrated blackbody 网格：对应 `blackbody`，用于简单连续谱组分。
 
-下图概括了当前预构建模型网格在有效温度和表面重力空间中的覆盖范围。精确的
-网格轴、金属丰度覆盖和文件路径仍以 `grid_description.yaml` 以及发布的网格
-文件为准。
+下图概括了当前预构建模型网格在有效温度和表面重力空间中的覆盖范围。图中只
+标出有效的非零光谱；源 FITS 文件中的 zero-flux placeholder 光谱已排除。
+精确的网格轴、金属丰度覆盖和文件路径仍以 `grid_description.yaml` 以及发布的
+网格文件为准。
 
 ![sedforge 模型网格覆盖范围](docs/assets/model_teff_logg_shaded_grid.png)
 

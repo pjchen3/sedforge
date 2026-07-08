@@ -299,8 +299,10 @@ be downloaded from a data release or generated locally.
   components.
 
 The current prepared model-grid coverage in effective temperature and surface
-gravity is summarized below. Exact axes, metallicity coverage, and file paths
-are defined by `grid_description.yaml` and the released grid files.
+gravity is summarized below. The plotted regions mark valid, nonzero spectra;
+zero-flux placeholder spectra in the source FITS files are excluded. Exact
+axes, metallicity coverage, and file paths are defined by
+`grid_description.yaml` and the released grid files.
 
 ![sedforge model grid coverage](docs/assets/model_teff_logg_shaded_grid.png)
 
