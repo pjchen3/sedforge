@@ -54,8 +54,10 @@ python -m pip install ".[hdf5]"        # HDF5 模型网格支持
 [doi:10.5281/zenodo.20520723](https://doi.org/10.5281/zenodo.20520723)。
 如果只运行下面 `ck_all` 的 Quick Start，至少需要下载 integrated-grid archive。
 如果希望生成带连续模型光谱的 SED 图，还需要下载 spectral-cache archive。
-只有在需要拟合或固定 `Rv`、并使用 `ck03_rv` 或 `newera_alpha0_rv` 这类
-HDF5 Rv 网格时，才需要下载对应的 HDF5 archive，并安装 `hdf5` extra。
+当前 v2026.06.03 data release 包含旧版 `ck03_cepheid_rv` HDF5 网格。
+sedforge 0.3.0 也支持完整的 `ck03_rv` 和 `newera_alpha0_rv`，但这两个文件尚未
+包含在该 Zenodo 记录中；用户需要使用包内脚本自行生成，或等待后续 data release。
+使用任何 HDF5 网格都需要安装 `hdf5` extra。
 
 把需要的 archive 解压到同一个上级目录中，让它们合并成同一个 `sed_models/`
 目录。模型网格目录通过环境变量 `SEDFORGE_MODELS` 指定：

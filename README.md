@@ -65,9 +65,11 @@ archives are available from Zenodo:
 [doi:10.5281/zenodo.20520723](https://doi.org/10.5281/zenodo.20520723).
 For the `ck_all` Quick Start below, download at least the integrated-grid
 archive. Download the spectral-cache archive too if you want SED plots with
-continuous model spectra. Download the HDF5 Rv-grid archives only if you plan
-to fit or fix `Rv` with grids such as `ck03_rv` or `newera_alpha0_rv`; these
-also require installing the `hdf5` extra.
+continuous model spectra. The current v2026.06.03 data release includes the
+legacy `ck03_cepheid_rv` HDF5 grid. sedforge 0.3.0 also supports the full
+`ck03_rv` and `newera_alpha0_rv` grids, but those two files are not yet part of
+that Zenodo record; generate them locally with the bundled scripts or obtain
+them from a future data release. Any HDF5 grid requires the `hdf5` extra.
 
 Unpack the archives in the same parent directory so that they merge into one
 `sed_models/` directory. The model grid directory is selected with
