@@ -21,6 +21,15 @@ sedforge 是一个用于恒星光度 SED（spectral energy distribution）拟合
   并在 `filter_info.dat` 中记录 photon/energy response convention；
 - 默认消光律为 `WC2019`，默认 `case1=1`。
 
+> [!IMPORTANT]
+> **不要把宽波段星等按固定有效波长换算成单色 flux density 后输入。**
+> 宽波段的源依赖有效波长会随 SED 谱型和消光而变化。sedforge 因此推荐保留
+> catalog 原生的 `mag`、`mag_err` 和 `system`：程序会用同一条完整 filter
+> response 分别积分 AB/Vega zero point 和每个模型 SED，再拟合响应加权的
+> band-averaged `Flambda`。在标准积分网格 likelihood 中，`eff_wave` 只作为
+> 绘图和滤光片元数据，而不是模型取值的波长。只有已经按照下文约定计算为响应
+> 加权 band-averaged `Flambda` 的通量，才适合作为直接 flux 输入。
+
 本 fork 继承原 Speedyfit 的 GPLv3 license。公开发布或再分发时，请保留
 GPLv3 license 和原始 attribution。
 

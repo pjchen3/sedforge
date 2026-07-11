@@ -30,6 +30,18 @@ This fork has been adapted for a magnitude-first workflow:
   with photon/energy response conventions recorded in `filter_info.dat`;
 - the default extinction law is `WC2019` with `case1=1`.
 
+> [!IMPORTANT]
+> **Do not convert broad-band magnitudes to monochromatic flux densities at a
+> fixed effective wavelength.** The source-dependent effective wavelength of a
+> wide passband shifts with the SED and extinction. sedforge therefore
+> recommends native catalog magnitudes (`mag`, `mag_err`, and `system`): it
+> integrates the AB/Vega zero point and every model SED through the same full
+> filter response, then fits response-weighted band-averaged `Flambda`. In the
+> standard integrated-grid likelihood, `eff_wave` is plotting/filter metadata,
+> not the wavelength at which the model is evaluated. Direct flux input is
+> valid only when it is already a response-weighted band-averaged `Flambda` in
+> the convention documented below.
+
 The project is based on the original GPLv3 Speedyfit package. If this fork is
 published or redistributed, keep the GPLv3 license and the original attribution.
 
