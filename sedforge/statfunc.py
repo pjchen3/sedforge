@@ -97,9 +97,9 @@ def _component_suffixes(pars):
 def _error_model_variance(meas, e_meas, pars=None, photbands=None,
                           error_model=None):
     meas = np.asarray(meas, dtype=float)
-    variance = np.asarray(e_meas, dtype=float) ** 2
+    base_variance = np.asarray(e_meas, dtype=float) ** 2
     if not error_model or error_model.get('type', 'none') == 'none':
-        return variance
+        return base_variance
 
     if photbands is None:
         raise ValueError("A group-level error model requires photbands.")
@@ -110,7 +110,9 @@ def _error_model_variance(meas, e_meas, pars=None, photbands=None,
     group_parameters = error_model.get('group_parameters', {})
     fixed_fractions = error_model.get('fixed_fractions', {})
 
-    for group, band_indices in band_groups.items():
+    fractions = {}
+    npoint = 1
+    for group in band_groups:
         if group in group_parameters:
             parameter = group_parameters[group]
             if parameter not in pars:
@@ -120,10 +122,29 @@ def _error_model_variance(meas, e_meas, pars=None, photbands=None,
                         group,
                     )
                 )
-            frac = float(pars[parameter])
+            fraction = np.asarray(pars[parameter], dtype=float)
         else:
-            frac = float(fixed_fractions[group])
-        if frac < 0:
+            fraction = np.asarray(fixed_fractions[group], dtype=float)
+        fraction = np.atleast_1d(fraction).reshape(-1)
+        npoint = max(npoint, len(fraction))
+        fractions[group] = fraction
+
+    if npoint == 1:
+        variance = base_variance.copy()
+    else:
+        variance = np.repeat(base_variance[:, None], npoint, axis=1)
+
+    for group, band_indices in band_groups.items():
+        frac = fractions[group]
+        if len(frac) == 1 and npoint > 1:
+            frac = np.full(npoint, float(frac[0]))
+        if len(frac) != npoint:
+            raise ValueError(
+                "Jitter group '{}' has {} values; expected 1 or {}.".format(
+                    group, len(frac), npoint,
+                )
+            )
+        if np.any(frac < 0):
             return np.full_like(variance, np.nan)
         band_indices = np.asarray(band_indices)
         if band_indices.dtype.kind in 'iu':
@@ -132,7 +153,10 @@ def _error_model_variance(meas, e_meas, pars=None, photbands=None,
             indices = np.where(np.isin(photbands, band_indices.astype(str)))[0]
         if len(indices) == 0:
             continue
-        variance[indices] += (frac * meas[indices]) ** 2
+        if npoint == 1:
+            variance[indices] += (float(frac[0]) * meas[indices]) ** 2
+        else:
+            variance[indices] += (meas[indices, None] * frac[None, :]) ** 2
     return variance
 
 
@@ -172,24 +196,33 @@ def stat_chi2(meas, e_meas, syn, pars=None, **kwargs):
 
     # check for NaNs in the observations
     nani = np.isnan(meas) | np.isnan(e_meas)
-    if any(nani):
+    if np.any(nani):
         warnings.warn('{} of the observed fluxes are NaN values! (NaN values are ignored)'.format(np.sum(nani)))
-    photbands = kwargs.get('photbands', None)
-    if photbands is not None:
-        photbands = np.asarray(photbands, dtype=str)[~nani]
-    meas, e_meas, syn = meas[~nani], e_meas[~nani], syn[~nani]
+        photbands = kwargs.get('photbands', None)
+        if photbands is not None:
+            photbands = np.asarray(photbands, dtype=str)[~nani]
+        meas, e_meas, syn = meas[~nani], e_meas[~nani], syn[~nani]
+    else:
+        photbands = kwargs.get('photbands', None)
 
-    errors = effective_errors(
+    variance = _error_model_variance(
         meas,
         e_meas,
         pars=pars,
         photbands=photbands,
         error_model=kwargs.get('error_model', None),
     )
-    variance = errors ** 2
 
     # The model is already physically normalised by radius and distance.
-    chisq = (syn - meas) ** 2 / variance
+    if np.asarray(syn).ndim > 1:
+        residual = syn - meas[:, None]
+        likelihood_variance = (
+            variance[:, None] if np.asarray(variance).ndim == 1 else variance
+        )
+    else:
+        residual = syn - meas
+        likelihood_variance = variance
+    chisq = residual ** 2 / likelihood_variance
     chi2 = chisq.sum(axis=0)
 
     error_model = kwargs.get('error_model', None) or {}

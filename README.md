@@ -65,8 +65,9 @@ archives are available from Zenodo:
 [doi:10.5281/zenodo.20520723](https://doi.org/10.5281/zenodo.20520723).
 For the `ck_all` Quick Start below, download at least the integrated-grid
 archive. Download the spectral-cache archive too if you want SED plots with
-continuous model spectra. Download the `ck03_cepheid_rv` HDF5 archive only if
-you plan to use that Cepheid `Rv` grid.
+continuous model spectra. Download the HDF5 Rv-grid archives only if you plan
+to fit or fix `Rv` with grids such as `ck03_rv` or `newera_alpha0_rv`; these
+also require installing the `hdf5` extra.
 
 Unpack the archives in the same parent directory so that they merge into one
 `sed_models/` directory. The model grid directory is selected with
@@ -84,6 +85,8 @@ sed_models/
   grid_description.yaml
   raw/              # original model spectra
   integrated/       # passband-integrated fitting grids
+  ck03_rv/          # optional HDF5 grid with an explicit Rv axis
+  newera_alpha0_rv/ # optional HDF5 grid with an explicit Rv axis
   spectral_cache/   # continuous spectra used only for plotting
 ```
 
@@ -285,13 +288,13 @@ be downloaded from a data release or generated locally.
 
 - Castelli & Kurucz 2003 (`ckm25`, `ckm20`, `ckm15`, `ckm10`, `ckm05`,
   `ckp00`, `ckp02`, `ckp05`, and the combined `ck_all` stack), including the
-  HDF5 `ck03_cepheid_rv` grid with explicit `Rv` and `Av` axes for Cepheid
-  work.
+  HDF5 `ck03_rv` grid with explicit `Rv` and `Av` axes.
 - TLUSTY/SYNSPEC hot-star grids (`tlusty00`, `tlusty01`, `tlusty02`,
   `tlusty05`, `tlusty10`, `tlusty20`, and `tlusty_all`), with
   `feh = log10(Z/Zsun)` for the non-zero metallicity stack.
 - PHOENIX NewEra V3 LowRes alpha=0 spectra (`newera_alpha0`), represented as
-  a grid with a real `[Fe/H]` axis.
+  a grid with a real `[Fe/H]` axis; the HDF5 `newera_alpha0_rv` grid also has
+  explicit `Rv` and `Av` axes.
 - Koester DA white-dwarf spectra (`koester2`).
 - TMAP H+He spectra (`tmap_he000` through `tmap_he100`) with fixed helium mass
   fraction.
@@ -422,30 +425,34 @@ For ordinary FITS integrated grids, `reddening_Rv` is a grid-selection
 constant, not a sampled parameter. Do not put `rv` in `pnames` for grids such
 as `ck_all`, `newera_alpha0`, `tlusty_all`, `koester2`, or `blackbody`.
 
-Cepheid work can use the special HDF5 grid `ck03_cepheid_rv`, which has an
-explicit `rv` axis. In that case remove `reddening_Rv`/`Rv` from the setup and
-provide `rv` either as a fitted parameter:
+HDF5 grids such as `ck03_rv` and `newera_alpha0_rv` have an explicit `rv`
+axis. In that case remove `reddening_Rv`/`Rv` from the setup and provide `rv`
+either as a fitted parameter:
 
 ```yaml
-grids: [ck03_cepheid_rv]
+grids: [ck03_rv]
 pnames: [teff, logg, feh, rad, distance, av, rv]
 limits:
-  - [4000, 8000]      # teff, K
+  - [3500, 50000]     # teff, K
   - [0.0, 5.0]        # logg, dex
-  - [-2.0, 0.5]       # [Fe/H], dex
-  - [1.0, 500.0]      # radius, Rsun
+  - [-2.5, 0.5]       # [Fe/H], dex
+  - [0.05, 500.0]     # radius, Rsun
   - [100, 100000]     # distance, pc
-  - [0.0, 6.2]        # Av, mag
+  - [0.0, 4.0]        # Av, mag
   - [2.0, 5.0]        # Rv
 ```
 
 or as a fixed value:
 
 ```yaml
-grids: [ck03_cepheid_rv]
+grids: [ck03_rv]
 fixed:
   rv: 3.1
 ```
+
+For `newera_alpha0_rv`, use the same `rv` pattern but choose NewEra parameter
+limits, for example `teff = 2300..12000 K`, `logg = 0..6`, and
+`[Fe/H] = -2.5..0.5`.
 
 Only filters fully covered by the model wavelength range should be used for a
 grid. Filter metadata such as effective wavelength and bandwidth can be stored
@@ -746,6 +753,83 @@ Do not use identical limits to fix a parameter; put it in `fixed` instead.
 For component-specific metallicities, use `feh2`, `feh3`, etc. The number of
 grids must match the number of components.
 
+## Performance, Batch Runs, And Diagnostics
+
+Explicit-`Rv` HDF5 grids are substantially larger than fixed-`Rv` FITS grids.
+For ordinary fits, the defaults are designed to keep memory bounded while
+preserving the exact likelihood:
+
+```yaml
+init_method: auto
+hdf5_preload: false
+hdf5_walker_cache: true
+hdf5_auto_full_cache_max_gb: 2.0
+vectorized_likelihood: true
+```
+
+For a single HDF5 component, `init_method: auto` selects a grid-aware walker
+initializer. It searches real atmosphere/extinction nodes, profiles the
+radius-distance normalization, and re-ranks candidates with the complete
+posterior. If the fast seed is implausibly poor, `init_grid_rescue: true`
+enables a derivative-free global rescue search. MAP initialization
+(`init_method: map`) remains available for smooth FITS grids but is rejected
+for piecewise, non-rectangular HDF5 grids.
+
+The HDF5 cache contains only real spectra inside the active setup limits.
+Proposals outside a local cache automatically fall back to exact HDF5
+interpolation, so caching does not restrict or alter the posterior. Set
+`hdf5_preload: true` only when non-MCMC code also benefits from eager loading.
+
+For many targets, use source-level parallelism with a CSV manifest:
+
+```bash
+sedforge batch sources.csv --setup-template template.yaml --workers 8
+```
+
+The manifest may contain a `setup_file` column, or columns that override the
+template. Dotted names update nested YAML values:
+
+```text
+source_id,photometryfile,output_dir,priors.distance,fixed.feh
+src001,phot/src001.phot,runs/src001,"[262.8, 10.0]",0.0
+src002,phot/src002.phot,runs/src002,"[120.5, 5.0]",0.0
+```
+
+Batch mode defaults to one MCMC worker per source and no plots. Homogeneous
+single-component jobs prewarm the union of their grid limits and passbands
+before workers fork, allowing compatible workers to share read-only cache
+pages. Use `--plots` for selected diagnostic runs, and adjust the shared-cache
+limit with `--shared-grid-cache-max-gb` when needed.
+
+Repeated batches can reuse a persistent runtime cache:
+
+```bash
+sedforge batch sources.csv --setup-template template.yaml --workers 8 \
+  --runtime-grid-cache-dir /path/to/sedforge-runtime-cache
+```
+
+The same location can be set with `SEDFORGE_RUNTIME_CACHE` or
+`runtime_grid_cache_dir` in a setup. Cache identities include the source grid
+metadata, active limits, variables, and passbands; stale or incomplete entries
+are ignored automatically.
+
+Post-burn chains are checked with rank-normalized/folded split R-hat, bulk and
+tail effective sample sizes, and walker acceptance fractions. Diagnostics are
+recorded in the result CSV and can also be written to YAML:
+
+```yaml
+convergence_rhat_threshold: 1.05
+convergence_min_acceptance: 0.01
+convergence_min_bulk_ess: 100
+convergence_min_tail_ess: 100
+convergence_action: warn
+diagnosticsfile: target_mcmc_diagnostics.yaml
+```
+
+Use `convergence_action: error` for production batches that should reject a
+chain failing the sampling-quality thresholds. Identifiability indicators such
+as posterior width and boundary occupancy are reported but do not fail a fit.
+
 ## Useful Commands
 
 Create a starter setup:
@@ -798,8 +882,11 @@ python -m build
 Typical outputs are:
 
 - `resultfile`: one-row CSV with median values and separate 16th/84th
-  percentile uncertainties (`*_err_minus`, `*_err_plus`);
+  percentile uncertainties (`*_err_minus`, `*_err_plus`) plus MCMC quality
+  fields such as `mcmc_status` and `mcmc_max_split_rhat`;
 - `datafile`: accepted MCMC samples as a FITS table;
+- `diagnosticsfile` (optional): YAML containing convergence, initialization,
+  and grid-cache diagnostics;
 - SED plot: observed fluxes and best/percentile model SED;
 - corner plot: posterior distributions for sampled parameters.
 

@@ -138,6 +138,8 @@ def _result_parameters(results, result):
    pars = {}
    ipars = {}
    for key, value in results.items():
+      if str(key).startswith('_') or isinstance(value, dict):
+         continue
       if _is_iterable_result(value):
          value = value[resi]
       pars[key] = value

@@ -60,6 +60,24 @@ nwalkers: 24     # total number of walkers
 nsteps: 4000     # steps taken by each walker (not including burn-in)
 nrelax: 500      # burn-in steps taken by each walker
 a: 10            # relative size of the steps taken
+init_method: auto # grid-aware for HDF5 grids; random for legacy FITS grids
+init_grid_rescue: true # globally re-search only when the fast grid seed has implausibly high chi2
+init_grid_rescue_cache_max_gb: 2.0 # full YAML-limit cache allowed for rescue initialization
+hdf5_preload: false # full active-subgrid cache; useful only for a single long fit
+hdf5_walker_cache: true # sparse valid-spectrum cache with exact HDF5 fallback
+hdf5_walker_cache_padding: 4 # local cache only; out-of-cache proposals use HDF5
+hdf5_walker_cache_max_gb: 0.25 # fallback local-cache budget for one source
+hdf5_walker_cache_envelope_max_gb: 2.0 # initial multi-mode cache envelope
+hdf5_auto_full_cache_max_gb: 2.0 # complete YAML-limit cache budget per source
+hdf5_walker_cache_refresh: 0 # set positive to enable adaptive cache updates
+hdf5_walker_cache_max_modes: 6 # high-posterior representatives per refresh
+vectorized_likelihood: true # batch all walkers through one integrated-grid interpolation call
+# runtime_grid_cache_dir: /path/to/cache # optional persistent read-only NPY cache
+convergence_rhat_threshold: 1.05
+convergence_min_acceptance: 0.01
+convergence_min_bulk_ess: 100
+convergence_min_tail_ess: 100
+convergence_action: warn # use error to reject failed chains in production batches
 percentiles: [0.2, 50, 99.8] # 16 - 84 corresponds to 1 sigma
 
 # ============================================================================
@@ -148,6 +166,24 @@ nwalkers: 24     # total number of walkers
 nsteps: 4000     # steps taken by each walker (not including burn-in)
 nrelax: 500      # burn-in steps taken by each walker
 a: 10            # relative size of the steps taken
+init_method: auto # grid-aware for single-component HDF5 grids
+init_grid_rescue: true # globally re-search only when the fast grid seed has implausibly high chi2
+init_grid_rescue_cache_max_gb: 2.0 # full YAML-limit cache allowed for rescue initialization
+hdf5_preload: false # full active-subgrid cache; useful only for a single long fit
+hdf5_walker_cache: true # sparse valid-spectrum cache with exact HDF5 fallback
+hdf5_walker_cache_padding: 4 # local cache only; out-of-cache proposals use HDF5
+hdf5_walker_cache_max_gb: 0.25 # fallback local-cache budget for one source
+hdf5_walker_cache_envelope_max_gb: 2.0 # initial multi-mode cache envelope
+hdf5_auto_full_cache_max_gb: 2.0 # complete YAML-limit cache budget per source
+hdf5_walker_cache_refresh: 0 # set positive to enable adaptive cache updates
+hdf5_walker_cache_max_modes: 6 # high-posterior representatives per refresh
+vectorized_likelihood: true # batch all walkers through one integrated-grid interpolation call
+# runtime_grid_cache_dir: /path/to/cache # optional persistent read-only NPY cache
+convergence_rhat_threshold: 1.05
+convergence_min_acceptance: 0.01
+convergence_min_bulk_ess: 100
+convergence_min_tail_ess: 100
+convergence_action: warn # use error to reject failed chains in production batches
 percentiles: [16, 50, 84] # 16 - 84 corresponds to 1 sigma
 
 # ============================================================================

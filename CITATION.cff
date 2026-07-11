@@ -1,8 +1,8 @@
 cff-version: 1.2.0
 message: "If you use sedforge in published research, please cite this software and the model grids, filter curves, catalogs, and extinction law used in your analysis."
 title: "sedforge: Flux-based photometric SED fitting for stellar astronomy"
-version: "0.2.5"
-date-released: "2026-06-02"
+version: "0.3.0"
+date-released: "2026-07-11"
 license: "GPL-3.0-only"
 authors:
   - name: "SED-fit contributors"

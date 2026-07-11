@@ -1,6 +1,10 @@
 import glob
+import hashlib
+import json
 import re
 import os
+import shutil
+import tempfile
 import yaml
 from itertools import product
 import numpy as np
@@ -11,6 +15,13 @@ from sedforge._compat import trapezoid
 from sedforge import interpol, spectral_cache
 
 PC_TO_RSOL = 44365810.04823812
+DEFAULT_HDF5_PRELOAD_MAX_GB = 2.0
+RUNTIME_CACHE_FORMAT_VERSION = 1
+FITS_RUNTIME_CACHE_FORMAT_VERSION = 1
+_GRID_CACHE = {}
+_SHARED_HDF5_CACHES = []
+_SHARED_FITS_GRIDS = []
+_GRID_FILE_CAPABILITY_CACHE = {}
 
 
 def _models_directory_from_env():
@@ -36,6 +47,29 @@ def _load_grid_description(directory):
 
 # load a list of all available integrated grids
 grid_description_file, grid_description = _load_grid_description(defaults.get('directory'))
+
+
+def clear_grid_cache():
+    """Clear prepared integrated-grid objects cached in this Python process."""
+    _GRID_CACHE.clear()
+    _SHARED_HDF5_CACHES.clear()
+    _SHARED_FITS_GRIDS.clear()
+    _GRID_FILE_CAPABILITY_CACHE.clear()
+
+
+def _freeze_for_cache(value):
+    if isinstance(value, np.ndarray):
+        return tuple(_freeze_for_cache(item) for item in value.tolist())
+    if isinstance(value, dict):
+        return tuple(
+            (str(key), _freeze_for_cache(val))
+            for key, val in sorted(value.items(), key=lambda item: str(item[0]))
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_for_cache(item) for item in value)
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 def check_grids(print_bands=False):
@@ -162,6 +196,25 @@ def _grid_integrated_format(gridname):
     return 'fits'
 
 
+def uses_hdf5_integrated_grid(grid):
+    """Return whether one or more integrated grids use the HDF5 backend.
+
+    ``grid`` may be a configured grid name, a prepared HDF5 grid object, or a
+    list of either.  This is intentionally a public capability check so
+    callers can choose numerical methods compatible with the grid backend.
+    """
+    if isinstance(grid, HDF5IntegratedGrid):
+        return True
+    if _is_prepared_grid(grid):
+        return False
+    if isinstance(grid, (str, dict)):
+        return _grid_integrated_format(grid) == 'hdf5'
+    try:
+        return any(uses_hdf5_integrated_grid(item) for item in grid)
+    except TypeError:
+        return False
+
+
 def get_spectral_cache_file(grid=None, required=False, **kwargs):
     grid = grid or kwargs.get('grid', defaults['grid'])
     path = spectral_cache.cache_file(
@@ -197,10 +250,15 @@ def get_grid_ranges(**kwargs):
         logg = (4.32, 4.32)
         rad = (0.05, 2.5)
 
-    elif grid == 'ck03_cepheid_rv':
-        teff = (4000, 8000)
-        logg = (0.0, 5.0)
-        rad = (1.0, 500.0)
+    elif grid == 'ck03_cepheid_rv' or str(grid).startswith('ck03_rv'):
+        if str(grid).startswith('ck03_rv'):
+            teff = (3500, 50000)
+            logg = (0.0, 5.0)
+            rad = (0.05, 500.0)
+        else:
+            teff = (4000, 8000)
+            logg = (0.0, 5.0)
+            rad = (1.0, 500.0)
 
     elif str(grid).startswith('tlusty'):
         teff = (15000, 55000)
@@ -233,11 +291,14 @@ def get_grid_ranges(**kwargs):
     ranges = {'teff': teff, 'logg': logg, 'rad': rad}
     if grid == 'ck_all':
         ranges['feh'] = (-2.5, 0.5)
-    elif grid == 'ck03_cepheid_rv':
-        ranges['feh'] = (-2.0, 0.5)
+    elif grid == 'ck03_cepheid_rv' or str(grid).startswith('ck03_rv'):
+        ranges['feh'] = (-2.5 if str(grid).startswith('ck03_rv') else -2.0, 0.5)
         ranges['rv'] = (2.0, 5.0)
     elif grid == 'tlusty_all':
         ranges['feh'] = (-1.0, 0.3010299956639812)
+    elif grid == 'newera_alpha0_rv':
+        ranges['feh'] = (-2.5, 0.5)
+        ranges['rv'] = (2.0, 5.0)
     elif str(grid).startswith('newera'):
         ranges['feh'] = (-2.0, 0.5)
     return ranges
@@ -291,6 +352,51 @@ def _field_name(data, name):
     return None
 
 
+def _grid_file_capabilities(path):
+    """Read integrated-grid axes once and reuse them across setup validation."""
+    path = os.path.abspath(os.path.expanduser(str(path)))
+    stat = os.stat(path)
+    key = (path, int(stat.st_size), int(stat.st_mtime_ns))
+    cached = _GRID_FILE_CAPABILITY_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    axes = set()
+    feh_varied = False
+    if path.endswith(('.h5', '.hdf5')):
+        import h5py
+        with h5py.File(path, 'r') as h5:
+            axes.update(str(name).lower() for name in h5.get('axes', {}).keys())
+            if 'feh' in axes:
+                values = np.asarray(h5['axes/feh'][:], dtype=float)
+                finite = values[np.isfinite(values)]
+                if len(finite):
+                    feh_varied = bool(np.any(finite != finite[0]))
+    else:
+        with fits.open(path, memmap=True) as ff:
+            data = ff[1].data
+            for name in _FIELD_ALIASES:
+                if _field_name(data, name) is not None:
+                    axes.add(name)
+            if 'feh' in axes:
+                field = _field_name(data, 'feh')
+                values = np.asarray(data.field(field), dtype=float)
+                finite = values[np.isfinite(values)]
+                if len(finite):
+                    first = finite[0]
+                    feh_varied = bool(np.any(finite != first))
+
+    result = {
+        'axes': frozenset(axes),
+        'feh_varied': bool(feh_varied),
+    }
+    for stale_key in list(_GRID_FILE_CAPABILITY_CACHE):
+        if stale_key[0] == path:
+            _GRID_FILE_CAPABILITY_CACHE.pop(stale_key, None)
+    _GRID_FILE_CAPABILITY_CACHE[key] = result
+    return result
+
+
 def _infer_grid_metadata(gridname):
     """Return fixed metadata values encoded in a grid description/name."""
     metadata = {}
@@ -340,6 +446,15 @@ def _grid_supports_feh(gridname):
             return any(_grid_supports_feh(member) for member in gridname['members'])
 
     if isinstance(gridname, str):
+        if gridname.lower() in {
+            'ck_all',
+            'ck03_rv',
+            'ck03_cepheid_rv',
+            'tlusty_all',
+            'newera_alpha0',
+            'newera_alpha0_rv',
+        }:
+            return True
         if re.fullmatch(r'ck[mp]\d{2}', gridname.lower()):
             return True
         desc = grid_description.get(gridname, {})
@@ -354,8 +469,7 @@ def _grid_supports_feh(gridname):
             return any(_grid_supports_feh(member) for member in desc['members'])
         if os.path.isfile(gridname):
             try:
-                with fits.open(gridname, memmap=True) as ff:
-                    return _field_name(ff[1].data, 'feh') is not None
+                return 'feh' in _grid_file_capabilities(gridname)['axes']
             except Exception:
                 return False
 
@@ -383,22 +497,18 @@ def grid_has_axis(gridname, axis):
         desc = grid_description.get(gridname, {})
         if axis == 'feh' and _grid_supports_feh(gridname):
             return True
+        if axis == 'rv' and gridname in {
+            'ck03_rv', 'ck03_cepheid_rv', 'newera_alpha0_rv',
+        }:
+            return True
         if axis == 'rv' and desc.get('supports_rv'):
             return True
         for key in ('axes', 'variables', 'parameters'):
             if axis in [str(item).lower() for item in desc.get(key, [])]:
                 return True
         if os.path.isfile(gridname):
-            if gridname.endswith(('.h5', '.hdf5')):
-                try:
-                    import h5py
-                    with h5py.File(gridname, 'r') as h5:
-                        return axis in h5.get('axes', {})
-                except Exception:
-                    return False
             try:
-                with fits.open(gridname, memmap=True) as ff:
-                    return _field_name(ff[1].data, axis) is not None
+                return axis in _grid_file_capabilities(gridname)['axes']
             except Exception:
                 return False
 
@@ -407,7 +517,13 @@ def grid_has_axis(gridname, axis):
 
 def grid_requires_feh_value(gridname):
     """Return True when a grid needs an explicit fitted or fixed Fe/H value."""
-    known_metallicity_axes = {'ck_all', 'tlusty_all', 'newera_alpha0'}
+    known_metallicity_axes = {
+        'ck_all',
+        'ck03_rv',
+        'tlusty_all',
+        'newera_alpha0',
+        'newera_alpha0_rv',
+    }
 
     if isinstance(gridname, dict):
         if 'members' in gridname:
@@ -431,13 +547,7 @@ def grid_requires_feh_value(gridname):
                 return True
         if os.path.isfile(gridname):
             try:
-                with fits.open(gridname, memmap=True) as ff:
-                    field = _field_name(ff[1].data, 'feh')
-                    if field is None:
-                        return False
-                    values = np.asarray(ff[1].data.field(field), dtype=float)
-                    values = values[np.isfinite(values)]
-                    return len(np.unique(values)) > 1
+                return _grid_file_capabilities(gridname)['feh_varied']
             except Exception:
                 return False
 
@@ -508,6 +618,16 @@ def _normalise_photband_name(name):
     return str(name.decode() if isinstance(name, bytes) else name)
 
 
+def _axis_indices_for_range(axis, requested):
+    snapped = _snap_range(axis, requested)
+    if snapped is None:
+        return None
+    low, high = snapped
+    axis = np.asarray(axis, dtype=float)
+    atol = max(1e-10, 1e-8 * max(1.0, abs(axis[0]), abs(axis[-1])))
+    return np.flatnonzero((axis >= low - atol) & (axis <= high + atol))
+
+
 def _axis_bounds(axis, value):
     axis = np.asarray(axis, dtype=float)
     value = float(value)
@@ -539,12 +659,31 @@ class HDF5IntegratedGrid:
 
     spec_axis_order = ('feh', 'teff', 'logg')
 
-    def __init__(self, path, photbands, variables=None, ranges=None):
+    def __init__(self, path, photbands, variables=None, ranges=None,
+                 preload=True, preload_max_gb=DEFAULT_HDF5_PRELOAD_MAX_GB,
+                 allow_walker_cache=True, runtime_cache_dir=None):
         self.path = str(path)
         self.photbands = [_normalise_photband_name(name) for name in photbands]
         self.variables = np.array(variables or ['teff', 'logg', 'av', 'feh', 'rv'])
         self.ranges = ranges or {}
+        self.preload = bool(preload)
+        self.preload_max_gb = float(preload_max_gb)
+        self.allow_walker_cache = bool(allow_walker_cache)
+        self.runtime_cache_dir = (
+            os.path.abspath(os.path.expanduser(str(runtime_cache_dir)))
+            if runtime_cache_dir else None
+        )
         self._handle = None
+        self._active_cache = None
+        self._active_caches = []
+        self._runtime_cache_hit = False
+        self._runtime_cache_path = None
+        self._runtime_cache_invalid_path = None
+        self._cache_statistics = {
+            'cached_points': 0,
+            'invalid_cached_points': 0,
+            'fallback_points': 0,
+        }
 
         import h5py
 
@@ -619,12 +758,514 @@ class HDF5IntegratedGrid:
             )
             self.spec_index[index] = ispec
 
+        self._attach_compatible_shared_cache()
+        if self.preload and not self._active_caches:
+            self._preload_active_subgrid()
+
+    def _cache_covers_active_ranges(self, cache):
+        """Return whether a shared union cache covers this grid's limits."""
+        for name in self.spec_axes:
+            needed = _axis_indices_for_range(
+                self.spec_axis_values[name],
+                self.ranges.get(name, (-np.inf, np.inf)),
+            )
+            if needed is None or not np.all(np.isin(
+                    self.spec_axis_values[name][needed], cache['spec_values'][name])):
+                return False
+        for name in ('rv', 'av'):
+            if name not in self.axes:
+                continue
+            needed = _axis_indices_for_range(
+                self.axes[name],
+                self.ranges.get(name, (-np.inf, np.inf)),
+            )
+            if needed is None or not np.all(np.isin(
+                    self.axes[name][needed], cache['axis_values'][name])):
+                return False
+        return True
+
+    def _attach_compatible_shared_cache(self):
+        if not self.allow_walker_cache:
+            return False
+        path = os.path.realpath(self.path)
+        for entry in reversed(_SHARED_HDF5_CACHES):
+            if entry['path'] != path:
+                continue
+            if any(band not in entry['photbands'] for band in self.photbands):
+                continue
+            cache = entry['cache']
+            if not self._cache_covers_active_ranges(cache):
+                continue
+            attached = dict(cache)
+            attached['band_indices'] = np.asarray(
+                [entry['photbands'].index(band) for band in self.photbands],
+                dtype=int,
+            )
+            attached['band_indices'].flags.writeable = False
+            self._active_caches = [attached]
+            self._active_cache = attached
+            return True
+        return False
+
+    def register_active_cache_as_shared(self):
+        """Expose a full union cache to compatible grids created after fork."""
+        full_caches = [
+            cache for cache in self._active_caches if cache['is_full_active_grid']
+        ]
+        if not full_caches:
+            return False
+        cache = full_caches[0]
+        entry = {
+            'path': os.path.realpath(self.path),
+            'photbands': list(self.photbands),
+            'cache': cache,
+        }
+        if not any(existing['cache'] is cache for existing in _SHARED_HDF5_CACHES):
+            _SHARED_HDF5_CACHES.append(entry)
+        return True
+
     @property
     def h5(self):
         if self._handle is None:
             import h5py
             self._handle = h5py.File(self.path, 'r')
         return self._handle
+
+    def close(self):
+        """Close a lazily opened HDF5 handle before process-level parallelism."""
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
+
+    @staticmethod
+    def _sample_axis_indices(values, indices, count, logarithmic=False):
+        """Select representative grid-axis indices, retaining both endpoints."""
+        indices = np.asarray(indices, dtype=int)
+        if len(indices) <= int(count):
+            return indices
+
+        selected_values = np.asarray(values, dtype=float)[indices]
+        if logarithmic and np.all(selected_values >= 0):
+            coordinates = np.log1p(selected_values)
+        else:
+            coordinates = selected_values
+        targets = np.linspace(coordinates[0], coordinates[-1], int(count))
+        positions = np.searchsorted(coordinates, targets)
+        positions = np.clip(positions, 0, len(indices) - 1)
+        previous = np.maximum(positions - 1, 0)
+        use_previous = np.abs(coordinates[previous] - targets) < np.abs(
+            coordinates[positions] - targets
+        )
+        positions[use_previous] = previous[use_previous]
+        return np.unique(indices[positions])
+
+    def _seed_spectrum_indices(self, maximum):
+        """Return valid atmosphere rows inside the active parameter ranges."""
+        nspec = len(self.spectra['teff'])
+        keep = np.ones(nspec, dtype=bool)
+        for name in self.spec_axes:
+            values = np.asarray(self.spectra[name], dtype=float)
+            snapped = _snap_range(
+                values,
+                self.ranges.get(name, (-np.inf, np.inf)),
+            )
+            if snapped is None:
+                return np.array([], dtype=int)
+            low, high = snapped
+            keep &= np.isfinite(values) & (values >= low) & (values <= high)
+
+        indices = np.flatnonzero(keep)
+        if len(indices) <= int(maximum):
+            return indices
+
+        # HDF5 spectra are ordered by their atmosphere axes. Even spacing in
+        # row index preserves a deterministic broad coverage at large scale.
+        positions = np.linspace(0, len(indices) - 1, int(maximum), dtype=int)
+        return np.unique(indices[positions])
+
+    def _seed_axis_indices(self, name):
+        if name not in self.axes:
+            return np.array([0], dtype=int)
+        indices = _axis_indices_for_range(
+            self.axes[name],
+            self.ranges.get(name, (-np.inf, np.inf)),
+        )
+        return np.array([], dtype=int) if indices is None else indices
+
+    @staticmethod
+    def _profile_scale_and_chi2(flux, obs, weights):
+        """Profile the positive flux normalization for a set of model vectors."""
+        flux = np.asarray(flux, dtype=float)
+        valid = np.all(np.isfinite(flux) & (flux > 0), axis=1)
+        scale = np.full(len(flux), np.nan, dtype=float)
+        chi2 = np.full(len(flux), np.inf, dtype=float)
+        if not np.any(valid):
+            return scale, chi2
+
+        values = flux[valid]
+        numerator = np.sum(values * (obs * weights), axis=1)
+        denominator = np.sum(values ** 2 * weights, axis=1)
+        usable = np.isfinite(numerator) & np.isfinite(denominator) & (denominator > 0)
+        profile_scale = np.full(len(values), np.nan, dtype=float)
+        profile_scale[usable] = numerator[usable] / denominator[usable]
+        usable &= profile_scale > 0
+        residual = values[usable] * profile_scale[usable, None] - obs
+        profile_chi2 = np.sum(residual ** 2 * weights, axis=1)
+
+        valid_indices = np.flatnonzero(valid)
+        usable_indices = valid_indices[usable]
+        scale[usable_indices] = profile_scale[usable]
+        chi2[usable_indices] = profile_chi2
+        return scale, chi2
+
+    def _profile_cache_mapping(self, spectrum_indices, rv_indices, av_indices):
+        """Map HDF5 node indices into an existing read-only flux cache."""
+        spectrum_indices = np.asarray(spectrum_indices, dtype=int)
+        rv_indices = np.asarray(rv_indices, dtype=int)
+        av_indices = np.asarray(av_indices, dtype=int)
+        for cache in self._active_caches:
+            spectrum_rows = cache['spectrum_row_lookup'][spectrum_indices]
+            if np.any(spectrum_rows < 0):
+                continue
+
+            local_axes = []
+            covered = True
+            for name, global_indices in (('rv', rv_indices), ('av', av_indices)):
+                lookup = cache['axis_row_lookup'].get(name)
+                if lookup is None:
+                    local = np.zeros(len(global_indices), dtype=int)
+                else:
+                    local = lookup[global_indices]
+                if np.any(local < 0):
+                    covered = False
+                    break
+                local_axes.append(local)
+            if covered:
+                return cache, spectrum_rows, local_axes[0], local_axes[1]
+        return None
+
+    def _append_profile_candidates(self, candidates, spectrum_indices,
+                                   rv_indices, av_indices, obs, weights,
+                                   keep_count, chunk_size=2048,
+                                   unique_spectra=False):
+        """Scan selected HDF5 nodes and retain only the best profile matches."""
+        spectrum_indices = np.unique(np.asarray(spectrum_indices, dtype=int))
+        if len(spectrum_indices) == 0:
+            return candidates
+
+        cache_mapping = self._profile_cache_mapping(
+            spectrum_indices, rv_indices, av_indices,
+        )
+        dset = None if cache_mapping is not None else self.h5['flux']
+        cache = cache_spectrum_rows = cache_rv = cache_av = None
+        if cache_mapping is not None:
+            cache, cache_spectrum_rows, cache_rv, cache_av = cache_mapping
+            spectrum_row_lookup = {
+                int(ispec): int(cache_row)
+                for ispec, cache_row in zip(spectrum_indices, cache_spectrum_rows)
+            }
+            rv_row_lookup = {
+                int(global_index): int(local_index)
+                for global_index, local_index in zip(rv_indices, cache_rv)
+            }
+            av_row_lookup = {
+                int(global_index): int(local_index)
+                for global_index, local_index in zip(av_indices, cache_av)
+            }
+        for rv_index in np.asarray(rv_indices, dtype=int):
+            for av_index in np.asarray(av_indices, dtype=int):
+                for start in range(0, len(spectrum_indices), int(chunk_size)):
+                    chunk = spectrum_indices[start:start + int(chunk_size)]
+                    if cache is None:
+                        rows = np.asarray(
+                            dset[chunk, int(rv_index), int(av_index), :],
+                            dtype=float,
+                        )[:, self.photband_indices]
+                    else:
+                        cached_rows = np.array(
+                            [spectrum_row_lookup[int(ispec)] for ispec in chunk],
+                            dtype=int,
+                        )
+                        log_rows = cache['log_flux'][
+                            cached_rows,
+                            rv_row_lookup[int(rv_index)],
+                            av_row_lookup[int(av_index)],
+                            :,
+                        ]
+                        log_rows = log_rows[:, cache['band_indices']]
+                        rows = 10.0 ** np.asarray(log_rows, dtype=float)
+                    scales, chi2 = self._profile_scale_and_chi2(rows, obs, weights)
+                    count = min(int(keep_count), len(chunk))
+                    if count == 0:
+                        continue
+                    selected = np.argpartition(chi2, count - 1)[:count]
+                    for local_index in selected:
+                        if not np.isfinite(chi2[local_index]):
+                            continue
+                        ispec = int(chunk[local_index])
+                        candidate = {
+                            'spec_index': ispec,
+                            'rv_index': int(rv_index),
+                            'av_index': int(av_index),
+                            'scale': float(scales[local_index]),
+                            'profile_chi2': float(chi2[local_index]),
+                        }
+                        for name in self.spec_axes:
+                            candidate[name] = float(self.spectra[name][ispec])
+                        if 'rv' in self.axes:
+                            candidate['rv'] = float(self.axes['rv'][rv_index])
+                        if 'av' in self.axes:
+                            candidate['av'] = float(self.axes['av'][av_index])
+                        candidates.append(candidate)
+
+                candidates.sort(key=lambda item: item['profile_chi2'])
+                if unique_spectra:
+                    retained = []
+                    seen = set()
+                    for candidate in candidates:
+                        ispec = int(candidate['spec_index'])
+                        if ispec in seen:
+                            continue
+                        seen.add(ispec)
+                        retained.append(candidate)
+                        if len(retained) >= int(keep_count):
+                            break
+                    candidates[:] = retained
+                else:
+                    del candidates[int(keep_count):]
+        return candidates
+
+    def _append_refined_profile_candidates(self, candidates, spectrum_indices,
+                                           rv_indices, av_indices, obs, weights,
+                                           keep_count, chunk_size=8):
+        """Scan small full Rv-Av cubes with batched HDF5 reads.
+
+        The refinement uses few atmosphere spectra but every active extinction
+        node. Reading a whole small cube avoids hundreds of thousands of tiny
+        HDF5 slice operations while evaluating exactly the same discrete nodes.
+        """
+        spectrum_indices = np.unique(np.asarray(spectrum_indices, dtype=int))
+        rv_indices = np.asarray(rv_indices, dtype=int)
+        av_indices = np.asarray(av_indices, dtype=int)
+        if len(spectrum_indices) == 0 or len(rv_indices) == 0 or len(av_indices) == 0:
+            return candidates
+
+        cache_mapping = self._profile_cache_mapping(
+            spectrum_indices, rv_indices, av_indices,
+        )
+        dset = None if cache_mapping is not None else self.h5['flux']
+        cache = cache_spectrum_rows = cache_rv = cache_av = None
+        if cache_mapping is not None:
+            cache, cache_spectrum_rows, cache_rv, cache_av = cache_mapping
+        for start in range(0, len(spectrum_indices), int(chunk_size)):
+            chunk = spectrum_indices[start:start + int(chunk_size)]
+            if cache is None:
+                cube = np.asarray(dset[chunk, :, :, :], dtype=float)
+                cube = cube[:, rv_indices, :, :]
+                cube = cube[:, :, av_indices, :]
+                rows = cube[..., self.photband_indices].reshape(-1, len(self.photbands))
+            else:
+                cached_rows = cache_spectrum_rows[start:start + len(chunk)]
+                log_cube = cache['log_flux'][cached_rows]
+                log_cube = log_cube[:, cache_rv, :, :]
+                log_cube = log_cube[:, :, cache_av, :]
+                log_cube = log_cube[..., cache['band_indices']]
+                rows = (10.0 ** np.asarray(log_cube, dtype=float)).reshape(
+                    -1, len(self.photbands)
+                )
+            scales, chi2 = self._profile_scale_and_chi2(rows, obs, weights)
+            count = min(int(keep_count), len(chi2))
+            if count == 0:
+                continue
+
+            selected = np.argpartition(chi2, count - 1)[:count]
+            for flat_index in selected:
+                if not np.isfinite(chi2[flat_index]):
+                    continue
+                local_spec, local_rv, local_av = np.unravel_index(
+                    int(flat_index),
+                    (len(chunk), len(rv_indices), len(av_indices)),
+                )
+                ispec = int(chunk[local_spec])
+                rv_index = int(rv_indices[local_rv])
+                av_index = int(av_indices[local_av])
+                candidate = {
+                    'spec_index': ispec,
+                    'rv_index': rv_index,
+                    'av_index': av_index,
+                    'scale': float(scales[flat_index]),
+                    'profile_chi2': float(chi2[flat_index]),
+                }
+                for name in self.spec_axes:
+                    candidate[name] = float(self.spectra[name][ispec])
+                if 'rv' in self.axes:
+                    candidate['rv'] = float(self.axes['rv'][rv_index])
+                if 'av' in self.axes:
+                    candidate['av'] = float(self.axes['av'][av_index])
+                candidates.append(candidate)
+
+            candidates.sort(key=lambda item: item['profile_chi2'])
+            del candidates[int(keep_count):]
+        return candidates
+
+    def profile_seed_candidates(self, obs, obs_err, maximum_spectra=12000,
+                                coarse_rv_points=7, coarse_av_points=11,
+                                coarse_keep_count=256, refine_spectra=64,
+                                result_count=256):
+        """Return high-likelihood discrete seeds without gradient optimization.
+
+        The first pass profiles the flux normalization over all active
+        atmosphere nodes and a sparse extinction grid. The second pass scans
+        the complete Av/Rv axes around the most promising atmosphere spectra.
+        These candidates are for MCMC initialization only; posterior sampling
+        continues to use the full interpolated model likelihood.
+        """
+        obs = np.asarray(obs, dtype=float)
+        obs_err = np.asarray(obs_err, dtype=float)
+        valid = np.isfinite(obs) & np.isfinite(obs_err) & (obs > 0) & (obs_err > 0)
+        if not np.all(valid):
+            obs, obs_err = obs[valid], obs_err[valid]
+        if len(obs) != len(self.photbands):
+            raise ValueError("Grid seed search requires finite positive observations in every fitted band.")
+        weights = 1.0 / obs_err ** 2
+
+        spectrum_indices = self._seed_spectrum_indices(maximum_spectra)
+        rv_indices = self._seed_axis_indices('rv')
+        av_indices = self._seed_axis_indices('av')
+        if len(spectrum_indices) == 0 or len(rv_indices) == 0 or len(av_indices) == 0:
+            return []
+
+        coarse_rv = self._sample_axis_indices(
+            self.axes.get('rv', np.array([0.0])),
+            rv_indices,
+            coarse_rv_points,
+        )
+        coarse_av = self._sample_axis_indices(
+            self.axes.get('av', np.array([0.0])),
+            av_indices,
+            coarse_av_points,
+            logarithmic=True,
+        )
+        candidates = self._append_profile_candidates(
+            [],
+            spectrum_indices,
+            coarse_rv,
+            coarse_av,
+            obs,
+            weights,
+            keep_count=coarse_keep_count,
+            unique_spectra=True,
+        )
+        if not candidates:
+            return []
+
+        refined_indices = np.array(
+            list(dict.fromkeys(candidate['spec_index'] for candidate in candidates))[:int(refine_spectra)],
+            dtype=int,
+        )
+        candidates = self._append_refined_profile_candidates(
+            candidates,
+            refined_indices,
+            rv_indices,
+            av_indices,
+            obs,
+            weights,
+            keep_count=result_count,
+        )
+        candidates.sort(key=lambda item: item['profile_chi2'])
+        return candidates[:int(result_count)]
+
+    def profile_continuous_seed_candidate(self, obs, obs_err, maxiter=80,
+                                          popsize=12, seed=20260711):
+        """Find a continuous profile-likelihood seed with global DE search.
+
+        This is a rescue path for cases where the fast discrete atmosphere
+        scan has an implausibly poor fit.  Radius/distance normalization is
+        still profiled analytically, so the optimizer only explores physical
+        integrated-grid coordinates.  The method is derivative-free and is
+        intended to run against an in-memory full active-subgrid cache.
+        """
+        from scipy.optimize import differential_evolution
+
+        obs = np.asarray(obs, dtype=float)
+        obs_err = np.asarray(obs_err, dtype=float)
+        weights = 1.0 / obs_err ** 2
+        search_names = [
+            str(name) for name in self.variables
+            if str(name) in self.spec_axes or str(name) in self.axes
+        ]
+        all_bounds = {}
+        for name in search_names:
+            axis = self.spec_axis_values[name] if name in self.spec_axes else self.axes[name]
+            allowed = self.ranges.get(name, (-np.inf, np.inf))
+            low = max(float(axis[0]), float(allowed[0]))
+            high = min(float(axis[-1]), float(allowed[1]))
+            if low > high:
+                return None
+            all_bounds[name] = (low, high)
+
+        variable_names = [
+            name for name in search_names
+            if all_bounds[name][1] > all_bounds[name][0]
+        ]
+        fixed_values = {
+            name: all_bounds[name][0]
+            for name in search_names if name not in variable_names
+        }
+
+        def objective(points):
+            points = np.asarray(points, dtype=float)
+            if points.ndim == 1:
+                points = points[:, None]
+            values = {
+                name: points[index]
+                for index, name in enumerate(variable_names)
+            }
+            npoint = points.shape[1]
+            values.update({
+                name: np.full(npoint, value, dtype=float)
+                for name, value in fixed_values.items()
+            })
+            flux, _labs = self.evaluate(**values)
+            flux = np.asarray(flux, dtype=float)
+            if flux.ndim == 1:
+                flux = flux[:, None]
+            _scales, chi2 = self._profile_scale_and_chi2(
+                flux.T, obs, weights,
+            )
+            return chi2
+
+        if variable_names:
+            result = differential_evolution(
+                objective,
+                [all_bounds[name] for name in variable_names],
+                maxiter=int(maxiter),
+                popsize=int(popsize),
+                seed=int(seed),
+                polish=False,
+                updating='deferred',
+                vectorized=True,
+            )
+            if not np.isfinite(result.fun):
+                return None
+            values = dict(fixed_values)
+            values.update({
+                name: float(value)
+                for name, value in zip(variable_names, result.x)
+            })
+        else:
+            values = dict(fixed_values)
+
+        flux, _labs = self.evaluate(**values)
+        scales, chi2 = self._profile_scale_and_chi2(
+            np.atleast_2d(np.asarray(flux, dtype=float)), obs, weights,
+        )
+        if len(chi2) == 0 or not np.isfinite(chi2[0]):
+            return None
+        candidate = dict(values)
+        candidate['scale'] = float(scales[0])
+        candidate['profile_chi2'] = float(chi2[0])
+        return candidate
 
     def _prepare_inputs(self, values_by_name):
         arrays = {}
@@ -661,8 +1302,599 @@ class HDF5IntegratedGrid:
                 bounds[name] = _axis_bounds(self.axes[name], arrays[name][ipoint])
         return bounds
 
-    def evaluate(self, **values_by_name):
-        arrays, npoint, scalar_input = self._prepare_inputs(values_by_name)
+    def _preload_axes(self, ranges=None):
+        ranges = self.ranges if ranges is None else ranges
+        spec_indices = {}
+        spec_values = {}
+        for name in self.spec_axes:
+            values = self.spec_axis_values[name]
+            indices = _axis_indices_for_range(
+                values,
+                ranges.get(name, (-np.inf, np.inf)),
+            )
+            if indices is None or len(indices) == 0:
+                return None
+            spec_indices[name] = indices
+            spec_values[name] = values[indices]
+
+        axis_indices = {}
+        axis_values = {}
+        for name in ('rv', 'av'):
+            if name not in self.axes:
+                continue
+            indices = _axis_indices_for_range(
+                self.axes[name],
+                ranges.get(name, (-np.inf, np.inf)),
+            )
+            if indices is None or len(indices) == 0:
+                return None
+            axis_indices[name] = indices
+            axis_values[name] = self.axes[name][indices]
+
+        return spec_indices, spec_values, axis_indices, axis_values
+
+    def _subgrid_estimate_gb(self, ranges):
+        layout = self._subgrid_layout(ranges)
+        if layout is None:
+            return None
+        _axes, spec_shape, spec_records = layout
+        _spec_indices, _spec_values, _axis_indices, axis_values = _axes
+        rv_len = len(axis_values.get('rv', np.array([0.0])))
+        av_len = len(axis_values.get('av', np.array([0.0])))
+        nrow = len(spec_records)
+        flux_bytes = nrow * rv_len * av_len * len(self.photbands) * np.dtype('f4').itemsize
+        lookup_bytes = int(np.prod(spec_shape, dtype=np.int64)) * np.dtype('i4').itemsize
+        lookup_bytes += len(self.spectra['teff']) * np.dtype('i4').itemsize
+        lookup_bytes += sum(len(self.axes[name]) * np.dtype('i4').itemsize
+                            for name in ('rv', 'av') if name in self.axes)
+        labs_bytes = nrow * np.dtype('f4').itemsize
+        return (flux_bytes + lookup_bytes + labs_bytes) / 1024.0 ** 3
+
+    def _subgrid_layout(self, ranges):
+        """Describe only valid atmosphere rows inside a requested subgrid.
+
+        Atmosphere grids are frequently non-rectangular.  Keeping one flux
+        cube row per real spectrum avoids allocating the much larger Cartesian
+        product of all Teff, logg, and metallicity axis values.
+        """
+        axes = self._preload_axes(ranges=ranges)
+        if axes is None:
+            return None
+        spec_indices, spec_values, _axis_indices, _axis_values = axes
+        spec_shape = tuple(len(spec_values[name]) for name in self.spec_axes)
+        spec_local_lookup = {
+            name: {
+                int(global_index): local_index
+                for local_index, global_index in enumerate(spec_indices[name])
+            }
+            for name in self.spec_axes
+        }
+        spec_records = []
+        for global_spec_index in product(*[spec_indices[name] for name in self.spec_axes]):
+            spec_index = tuple(int(index) for index in global_spec_index)
+            ispec = int(self.spec_index[spec_index])
+            if ispec < 0:
+                continue
+            local_spec_index = tuple(
+                spec_local_lookup[name][int(index)]
+                for name, index in zip(self.spec_axes, spec_index)
+            )
+            spec_records.append((ispec, local_spec_index))
+        spec_records.sort(key=lambda item: item[0])
+        return axes, spec_shape, spec_records
+
+    @staticmethod
+    def _cache_range_key(ranges):
+        if ranges is None:
+            return ('full_active_grid',)
+        return tuple(
+            (str(name), float(bounds[0]), float(bounds[1]))
+            for name, bounds in sorted(ranges.items())
+        )
+
+    def _runtime_cache_identity(self):
+        if self.runtime_cache_dir is None:
+            return None, None
+        source = os.stat(self.path)
+        payload = {
+            'format_version': RUNTIME_CACHE_FORMAT_VERSION,
+            'source_path': os.path.realpath(self.path),
+            'source_size': int(source.st_size),
+            'source_mtime_ns': int(source.st_mtime_ns),
+            'photbands': list(self.photbands),
+            'variables': [str(name) for name in self.variables],
+            'ranges': repr(_freeze_for_cache(self.ranges)),
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        digest = hashlib.sha256(encoded).hexdigest()[:24]
+        return payload, os.path.join(self.runtime_cache_dir, 'hdf5_' + digest)
+
+    @staticmethod
+    def _runtime_array_path(directory, name):
+        return os.path.join(directory, name + '.npy')
+
+    def _load_runtime_cache(self):
+        identity, directory = self._runtime_cache_identity()
+        if directory is None or not os.path.isdir(directory):
+            return None
+        try:
+            with open(os.path.join(directory, 'metadata.json')) as handle:
+                metadata = json.load(handle)
+            if metadata.get('identity') != identity:
+                self._runtime_cache_invalid_path = directory
+                return None
+
+            def load(name):
+                return np.load(
+                    self._runtime_array_path(directory, name),
+                    mmap_mode='r',
+                    allow_pickle=False,
+                )
+            spec_names = metadata['spec_names']
+            axis_names = metadata['axis_names']
+            cache = {
+                'spec_values': {name: load('spec_values_' + name) for name in spec_names},
+                'axis_values': {name: load('axis_values_' + name) for name in axis_names},
+                'log_flux': load('log_flux'),
+                'log_labs': load('log_labs'),
+                'spec_row_index': load('spec_row_index'),
+                'spectrum_row_lookup': load('spectrum_row_lookup'),
+                'axis_row_lookup': {
+                    name: load('axis_row_lookup_' + name) for name in axis_names
+                },
+                'band_indices': load('band_indices'),
+                'estimate_gb': float(metadata['estimate_gb']),
+                'is_full_active_grid': True,
+                'range_key': self._cache_range_key(None),
+                'persistent': True,
+            }
+            expected_shape = tuple(metadata['log_flux_shape'])
+            if cache['log_flux'].shape != expected_shape:
+                self._runtime_cache_invalid_path = directory
+                return None
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            self._runtime_cache_invalid_path = directory
+            return None
+
+        self._runtime_cache_hit = True
+        self._runtime_cache_path = directory
+        return cache
+
+    def _write_runtime_cache(self, cache):
+        identity, directory = self._runtime_cache_identity()
+        if directory is None:
+            return False
+        replace_invalid = (
+            os.path.isdir(directory)
+            and self._runtime_cache_invalid_path == directory
+        )
+        if os.path.isdir(directory) and not replace_invalid:
+            return False
+        os.makedirs(self.runtime_cache_dir, exist_ok=True)
+        temporary = tempfile.mkdtemp(prefix='.sedforge-cache-', dir=self.runtime_cache_dir)
+        try:
+            def save(name, values):
+                np.save(
+                    self._runtime_array_path(temporary, name),
+                    np.asarray(values),
+                    allow_pickle=False,
+                )
+
+            save('log_flux', cache['log_flux'])
+            save('log_labs', cache['log_labs'])
+            save('spec_row_index', cache['spec_row_index'])
+            save('spectrum_row_lookup', cache['spectrum_row_lookup'])
+            save('band_indices', cache['band_indices'])
+            for name, values in cache['spec_values'].items():
+                save('spec_values_' + name, values)
+            for name, values in cache['axis_values'].items():
+                save('axis_values_' + name, values)
+                save('axis_row_lookup_' + name, cache['axis_row_lookup'][name])
+
+            metadata = {
+                'identity': identity,
+                'spec_names': list(cache['spec_values']),
+                'axis_names': list(cache['axis_values']),
+                'estimate_gb': float(cache['estimate_gb']),
+                'log_flux_shape': list(cache['log_flux'].shape),
+            }
+            with open(os.path.join(temporary, 'metadata.json'), 'w') as handle:
+                json.dump(metadata, handle, sort_keys=True)
+            backup = None
+            if replace_invalid and os.path.isdir(directory):
+                backup = directory + '.invalid-{}'.format(os.getpid())
+                os.rename(directory, backup)
+            try:
+                os.rename(temporary, directory)
+            except FileExistsError:
+                if backup is not None and not os.path.exists(directory):
+                    os.rename(backup, directory)
+                return False
+            if backup is not None and os.path.isdir(backup):
+                shutil.rmtree(backup)
+            self._runtime_cache_path = directory
+            self._runtime_cache_invalid_path = None
+            return True
+        finally:
+            if os.path.isdir(temporary):
+                shutil.rmtree(temporary)
+
+    def _preload_active_subgrid(self, ranges=None, append=False, max_gb=None):
+        if ranges is None and not append:
+            persistent_cache = self._load_runtime_cache()
+            if persistent_cache is not None:
+                self._active_caches = [persistent_cache]
+                self._active_cache = persistent_cache
+                print(
+                    "Memory-mapped persistent HDF5 cache for {}: shape {}, {:.3f} GB.".format(
+                        os.path.basename(self.path),
+                        persistent_cache['log_flux'].shape,
+                        persistent_cache['estimate_gb'],
+                    )
+                )
+                return
+        layout = self._subgrid_layout(ranges)
+        if layout is None:
+            return
+        axes, spec_shape, spec_records = layout
+        spec_indices, spec_values, axis_indices, axis_values = axes
+        rv_len = len(axis_values.get('rv', np.array([0.0])))
+        av_len = len(axis_values.get('av', np.array([0.0])))
+        nband = len(self.photbands)
+        nrow = len(spec_records)
+        flux_bytes = nrow * rv_len * av_len * nband * np.dtype('f4').itemsize
+        lookup_bytes = int(np.prod(spec_shape, dtype=np.int64)) * np.dtype('i4').itemsize
+        lookup_bytes += len(self.spectra['teff']) * np.dtype('i4').itemsize
+        lookup_bytes += sum(len(self.axes[name]) * np.dtype('i4').itemsize
+                            for name in ('rv', 'av') if name in self.axes)
+        labs_bytes = nrow * np.dtype('f4').itemsize
+        estimate_gb = (flux_bytes + lookup_bytes + labs_bytes) / 1024.0 ** 3
+        limit_gb = self.preload_max_gb if max_gb is None else float(max_gb)
+        if estimate_gb > limit_gb:
+            print(
+                "HDF5 grid preload skipped for {}: active subgrid is {:.2f} GB "
+                "(limit {:.2f} GB).".format(
+                    os.path.basename(self.path),
+                    estimate_gb,
+                    limit_gb,
+                )
+            )
+            return
+
+        log_flux = np.full((nrow, rv_len, av_len, nband), np.nan, dtype=np.float32)
+        log_labs = np.full(nrow, np.nan, dtype=np.float32)
+        spec_row_index = np.full(spec_shape, -1, dtype=np.int32)
+        spectrum_row_lookup = np.full(len(self.spectra['teff']), -1, dtype=np.int32)
+        axis_row_lookup = {}
+        for name in ('rv', 'av'):
+            if name not in self.axes:
+                continue
+            lookup = np.full(len(self.axes[name]), -1, dtype=np.int32)
+            lookup[axis_indices[name]] = np.arange(len(axis_indices[name]), dtype=np.int32)
+            lookup.flags.writeable = False
+            axis_row_lookup[name] = lookup
+        rv_index = axis_indices.get('rv', np.array([0], dtype=int))
+        av_index = axis_indices.get('av', np.array([0], dtype=int))
+        rv_slice = slice(int(rv_index[0]), int(rv_index[-1]) + 1)
+        av_slice = slice(int(av_index[0]), int(av_index[-1]) + 1)
+        band_order = np.argsort(self.photband_indices)
+        sorted_bands = self.photband_indices[band_order]
+        restore_band_order = np.argsort(band_order)
+        indexed_records = []
+        for cache_row, (ispec, local_spec_index) in enumerate(spec_records):
+            spec_row_index[local_spec_index] = cache_row
+            spectrum_row_lookup[ispec] = cache_row
+            labs_value = float(self.spectra['Labs'][ispec])
+            if labs_value > 0 and np.isfinite(labs_value):
+                log_labs[cache_row] = np.log10(labs_value)
+            indexed_records.append((ispec, cache_row))
+
+        spec_blocks = []
+        for ispec, cache_row in indexed_records:
+            if not spec_blocks or ispec != spec_blocks[-1]['stop']:
+                spec_blocks.append({
+                    'start': ispec,
+                    'stop': ispec + 1,
+                    'rows': [cache_row],
+                })
+            else:
+                spec_blocks[-1]['stop'] = ispec + 1
+                spec_blocks[-1]['rows'].append(cache_row)
+
+        import h5py
+
+        with h5py.File(self.path, 'r') as h5:
+            dset = h5['flux']
+            for block in spec_blocks:
+                rows = np.asarray(
+                    dset[
+                        slice(block['start'], block['stop']),
+                        rv_slice,
+                        av_slice,
+                        sorted_bands,
+                    ],
+                    dtype=np.float32,
+                )
+                rows = rows[:, :, :, restore_band_order]
+                with np.errstate(invalid='ignore', divide='ignore'):
+                    rows = np.log10(rows)
+                rows[~np.isfinite(rows)] = np.nan
+                for irow, cache_row in enumerate(block['rows']):
+                    log_flux[cache_row] = rows[irow]
+
+        log_flux.flags.writeable = False
+        log_labs.flags.writeable = False
+        spec_row_index.flags.writeable = False
+        spectrum_row_lookup.flags.writeable = False
+        band_indices = np.arange(nband, dtype=int)
+        band_indices.flags.writeable = False
+        cache = {
+            'spec_values': spec_values,
+            'axis_values': axis_values,
+            'log_flux': log_flux,
+            'log_labs': log_labs,
+            'spec_row_index': spec_row_index,
+            'spectrum_row_lookup': spectrum_row_lookup,
+            'axis_row_lookup': axis_row_lookup,
+            'band_indices': band_indices,
+            'estimate_gb': estimate_gb,
+            'is_full_active_grid': ranges is None,
+            'range_key': self._cache_range_key(ranges),
+            'persistent': False,
+        }
+        if append:
+            self._active_caches.append(cache)
+        else:
+            self._active_caches = [cache]
+        self._active_cache = self._active_caches[0]
+        if ranges is None and not append:
+            self._write_runtime_cache(cache)
+        print(
+            "Preloaded HDF5 active subgrid for {}: shape {}, {:.3f} GB.".format(
+                os.path.basename(self.path),
+                log_flux.shape,
+                estimate_gb,
+            )
+        )
+
+    @staticmethod
+    def _neighborhood_range(axis, values, allowed_range, padding):
+        """Return a grid-node window around finite parameter values."""
+        axis = np.asarray(axis, dtype=float)
+        indices = _axis_indices_for_range(axis, allowed_range)
+        if indices is None or len(indices) == 0:
+            return None
+        values = np.asarray(values, dtype=float)
+        values = values[np.isfinite(values)]
+        if len(values) == 0:
+            return None
+
+        low_value = max(float(np.min(values)), float(axis[indices[0]]))
+        high_value = min(float(np.max(values)), float(axis[indices[-1]]))
+        low_index = int(np.searchsorted(axis, low_value, side='right') - 1)
+        high_index = int(np.searchsorted(axis, high_value, side='left'))
+        low_index = max(int(indices[0]), low_index - int(padding))
+        high_index = min(int(indices[-1]), high_index + int(padding))
+        if low_index > high_index:
+            return None
+        return float(axis[low_index]), float(axis[high_index])
+
+    def _neighborhood_ranges(self, values_by_name, padding):
+        ranges = {}
+        for name in self.spec_axes:
+            if name not in values_by_name:
+                return None
+            window = self._neighborhood_range(
+                self.spec_axis_values[name],
+                values_by_name[name],
+                self.ranges.get(name, (-np.inf, np.inf)),
+                padding,
+            )
+            if window is None:
+                return None
+            ranges[name] = window
+        for name in ('rv', 'av'):
+            if name not in self.axes:
+                continue
+            if name not in values_by_name:
+                return None
+            window = self._neighborhood_range(
+                self.axes[name],
+                values_by_name[name],
+                self.ranges.get(name, (-np.inf, np.inf)),
+                padding,
+            )
+            if window is None:
+                return None
+            ranges[name] = window
+        return ranges
+
+    def preload_neighborhoods(self, neighborhoods, padding=1,
+                              max_total_gb=None):
+        """Preload one small cache per posterior mode without restricting it.
+
+        The caches are read-only accelerators. ``evaluate`` falls back to the
+        original HDF5 interpolation when a proposed point is outside every
+        cache or lies at a non-rectangular missing atmosphere node.
+        """
+        if not self.allow_walker_cache:
+            return False
+        if any(cache['is_full_active_grid'] for cache in self._active_caches):
+            return True
+
+        created = 0
+        current_gb = sum(cache['estimate_gb'] for cache in self._active_caches)
+        existing_keys = {cache['range_key'] for cache in self._active_caches}
+        for values_by_name in neighborhoods:
+            ranges = self._neighborhood_ranges(values_by_name, padding)
+            if ranges is None:
+                continue
+            range_key = self._cache_range_key(ranges)
+            if range_key in existing_keys:
+                continue
+            estimate_gb = self._subgrid_estimate_gb(ranges)
+            if estimate_gb is None:
+                continue
+            if max_total_gb is not None and current_gb + estimate_gb > float(max_total_gb):
+                continue
+            before = len(self._active_caches)
+            self._preload_active_subgrid(ranges=ranges, append=True)
+            if len(self._active_caches) > before:
+                created += 1
+                current_gb += estimate_gb
+                existing_keys.add(range_key)
+        return created > 0
+
+    def preload_mode_envelope(self, neighborhoods, padding=1, max_gb=2.0):
+        """Preload one bounded envelope covering all retained seed modes."""
+        if not self.allow_walker_cache or max_gb is None or float(max_gb) <= 0:
+            return False
+        if any(cache['is_full_active_grid'] for cache in self._active_caches):
+            return True
+
+        ranges_list = [
+            self._neighborhood_ranges(values_by_name, padding)
+            for values_by_name in neighborhoods
+        ]
+        ranges_list = [ranges for ranges in ranges_list if ranges is not None]
+        if not ranges_list:
+            return False
+        names = set().union(*(ranges.keys() for ranges in ranges_list))
+        envelope = {
+            name: (
+                min(ranges[name][0] for ranges in ranges_list),
+                max(ranges[name][1] for ranges in ranges_list),
+            )
+            for name in names
+        }
+        estimate_gb = self._subgrid_estimate_gb(envelope)
+        if estimate_gb is None or estimate_gb > float(max_gb):
+            return False
+        self._preload_active_subgrid(
+            ranges=envelope,
+            append=False,
+            max_gb=max_gb,
+        )
+        return bool(self._active_caches)
+
+    def preload_full_active_subgrid(self, max_gb=2.0):
+        """Promote to a full active-subgrid cache only within an explicit cap."""
+        if not self.allow_walker_cache or max_gb is None or float(max_gb) <= 0:
+            return False
+        if any(cache['is_full_active_grid'] for cache in self._active_caches):
+            return True
+        estimate_gb = self._subgrid_estimate_gb(None)
+        if estimate_gb is None or estimate_gb > float(max_gb):
+            return False
+        self._preload_active_subgrid(ranges=None, append=False, max_gb=max_gb)
+        return bool(self._active_caches)
+
+    def preload_neighborhood(self, values_by_name, padding=1):
+        """Compatibility wrapper for a one-mode walker cache."""
+        return self.preload_neighborhoods([values_by_name], padding=padding)
+
+    def cache_diagnostics(self):
+        """Return read-cache metadata for single-process performance checks."""
+        diagnostics = dict(self._cache_statistics)
+        diagnostics['active'] = bool(self._active_caches)
+        diagnostics['cache_count'] = len(self._active_caches)
+        diagnostics['estimate_gb'] = float(sum(
+            cache['estimate_gb'] for cache in self._active_caches
+        ))
+        diagnostics['shapes'] = [
+            list(cache['log_flux'].shape) for cache in self._active_caches
+        ]
+        diagnostics['runtime_cache_hit'] = bool(self._runtime_cache_hit)
+        diagnostics['runtime_cache_path'] = self._runtime_cache_path
+        return diagnostics
+
+    def reset_cache_statistics(self):
+        """Reset per-fit counters while retaining reusable read-only caches."""
+        for name in self._cache_statistics:
+            self._cache_statistics[name] = 0
+
+    @staticmethod
+    def _cache_covers(cache, arrays):
+        axes = {}
+        axes.update(cache['spec_values'])
+        axes.update(cache['axis_values'])
+        for name, axis in axes.items():
+            values = np.asarray(arrays[name], dtype=float)
+            atol = max(1e-10, 1e-8 * max(1.0, abs(axis[0]), abs(axis[-1])))
+            if np.any(values < axis[0] - atol) or np.any(values > axis[-1] + atol):
+                return False
+        return True
+
+    def _corner_bounds_cached(self, cache, arrays, ipoint):
+        bounds = {}
+        for name in self.spec_axes:
+            bounds[name] = _axis_bounds(cache['spec_values'][name], arrays[name][ipoint])
+        for name in ('rv', 'av'):
+            if name in cache['axis_values']:
+                bounds[name] = _axis_bounds(cache['axis_values'][name], arrays[name][ipoint])
+        return bounds
+
+    def _evaluate_cached(self, cache, arrays, npoint, scalar_input):
+        nband = len(self.photbands)
+        flux = np.empty((nband, npoint), dtype=float)
+        labs = np.empty(npoint, dtype=float)
+        log_flux_grid = cache['log_flux']
+        log_labs_grid = cache['log_labs']
+        spec_row_index = cache['spec_row_index']
+
+        for ipoint in range(npoint):
+            bounds = self._corner_bounds_cached(cache, arrays, ipoint)
+            spec_items = [bounds[name] for name in self.spec_axes]
+            rv_items = bounds.get('rv', [(0, 1.0)])
+            av_items = bounds.get('av', [(0, 1.0)])
+
+            log_flux = np.zeros(nband, dtype=float)
+            log_labs = 0.0
+            total_weight = 0.0
+
+            for spec_corner in product(*spec_items):
+                spec_indices = tuple(item[0] for item in spec_corner)
+                spec_weight = float(np.prod([item[1] for item in spec_corner]))
+                if spec_weight == 0.0:
+                    continue
+                cache_row = int(spec_row_index[spec_indices])
+                if cache_row < 0:
+                    continue
+                labs_value = float(log_labs_grid[cache_row])
+                if not np.isfinite(labs_value):
+                    continue
+
+                for rv_index, rv_weight in rv_items:
+                    for av_index, av_weight in av_items:
+                        weight = spec_weight * rv_weight * av_weight
+                        if weight == 0.0:
+                            continue
+                        row = np.asarray(
+                            log_flux_grid[cache_row, rv_index, av_index, :],
+                            dtype=float,
+                        )
+                        row = row[cache['band_indices']]
+                        if not np.all(np.isfinite(row)):
+                            continue
+                        log_flux += weight * row
+                        log_labs += weight * labs_value
+                        total_weight += weight
+
+            if total_weight <= 0:
+                flux[:, ipoint] = np.nan
+                labs[ipoint] = np.nan
+            else:
+                log_flux /= total_weight
+                log_labs /= total_weight
+                flux[:, ipoint] = 10.0 ** log_flux
+                labs[ipoint] = 10.0 ** log_labs
+
+        if scalar_input:
+            return flux[:, 0], labs[:1]
+        return flux, labs
+
+    def _evaluate_uncached(self, arrays, npoint, scalar_input):
+
         nband = len(self.photbands)
         flux = np.empty((nband, npoint), dtype=float)
         labs = np.empty(npoint, dtype=float)
@@ -715,14 +1947,149 @@ class HDF5IntegratedGrid:
             return flux[:, 0], labs[:1]
         return flux, labs
 
+    def evaluate(self, **values_by_name):
+        arrays, npoint, scalar_input = self._prepare_inputs(values_by_name)
+        for cache in self._active_caches:
+            if not self._cache_covers(cache, arrays):
+                continue
+            flux, labs = self._evaluate_cached(cache, arrays, npoint, scalar_input)
+            if np.all(np.isfinite(flux)) and np.all(np.isfinite(labs)):
+                self._cache_statistics['cached_points'] += int(npoint)
+            else:
+                # A covering cache contains every valid atmosphere corner in
+                # its axis range.  A non-finite result therefore represents a
+                # genuinely unsupported point in a non-rectangular grid; the
+                # raw HDF5 interpolation would return the same result.
+                self._cache_statistics['invalid_cached_points'] += int(npoint)
+            return flux, labs
+        if self._active_caches:
+            self._cache_statistics['fallback_points'] += int(npoint)
+        return self._evaluate_uncached(arrays, npoint, scalar_input)
+
+
+def _fits_source_identity(gridname, reddening_law, reddening_rv,
+                          reddening_case1):
+    files = []
+    for member in _normalise_grid_members(gridname):
+        path = get_grid_file(
+            integrated=True,
+            grid=member['grid'],
+            reddening_law=reddening_law,
+            reddening_Rv=reddening_rv,
+            reddening_case1=reddening_case1,
+        )
+        stat = os.stat(path)
+        files.append((
+            os.path.realpath(path),
+            int(stat.st_size),
+            int(stat.st_mtime_ns),
+        ))
+    return tuple(files)
+
+
+def _fits_shared_signature(gridname, variables, reddening_law,
+                           reddening_rv, reddening_case1):
+    return (
+        _fits_source_identity(
+            gridname, reddening_law, reddening_rv, reddening_case1,
+        ),
+        tuple(str(name) for name in variables),
+        str(reddening_law),
+        float(reddening_rv),
+        int(reddening_case1),
+    )
+
+
+def register_shared_fits_grid(gridname, variables, photbands, axis_values,
+                              pixelgrid, grid_names, reddening_law='WC2019',
+                              reddening_rv=3.1, reddening_case1=1):
+    """Register one parent-built FITS union grid for forked source workers."""
+    entry = {
+        'signature': _fits_shared_signature(
+            gridname, variables, reddening_law, reddening_rv, reddening_case1,
+        ),
+        'photbands': [_normalise_photband_name(name) for name in photbands],
+        'axis_values': axis_values,
+        'pixelgrid': pixelgrid,
+        'grid_names': np.asarray(grid_names),
+    }
+    _SHARED_FITS_GRIDS.append(entry)
+    return True
+
+
+def _shared_fits_grid(gridname, variables, ranges, photbands,
+                      reddening_law='WC2019', reddening_rv=3.1,
+                      reddening_case1=1):
+    signature = _fits_shared_signature(
+        gridname, variables, reddening_law, reddening_rv, reddening_case1,
+    )
+    requested_bands = [_normalise_photband_name(name) for name in photbands]
+    for entry in reversed(_SHARED_FITS_GRIDS):
+        if entry['signature'] != signature:
+            continue
+        if any(name not in entry['photbands'] for name in requested_bands):
+            continue
+        covered = True
+        for name, axis in zip(entry['grid_names'], entry['axis_values']):
+            low, high = ranges.get(str(name), (-np.inf, np.inf))
+            tolerance = max(1e-10, 1e-8 * max(1.0, abs(axis[0]), abs(axis[-1])))
+            if (np.isfinite(low) and low < axis[0] - tolerance) or \
+                    (np.isfinite(high) and high > axis[-1] + tolerance):
+                covered = False
+                break
+        if not covered:
+            continue
+        output_indices = np.asarray(
+            [entry['photbands'].index(name) for name in requested_bands]
+            + [len(entry['photbands'])],
+            dtype=int,
+        )
+        output_indices.flags.writeable = False
+        metadata = {
+            'output_indices': output_indices,
+            'shared_union': True,
+        }
+        return [
+            entry['axis_values'],
+            entry['pixelgrid'],
+            entry['grid_names'],
+            metadata,
+        ]
+    return None
+
 
 def load_grids(gridnames, pnames, limits, photbands,
                grid_variables=None, reddening_law='WC2019',
-               reddening_Rv=3.1, reddening_case1=1):
+               reddening_Rv=3.1, reddening_case1=1,
+               use_cache=True, hdf5_preload=True,
+               hdf5_preload_max_gb=DEFAULT_HDF5_PRELOAD_MAX_GB,
+               hdf5_walker_cache=True, hdf5_runtime_cache_dir=None,
+               runtime_cache_dir=None):
     """
     prepares the integrated photometry grid by loading the grid and cutting it to the size
     given in limits.
     """
+    if runtime_cache_dir is None:
+        runtime_cache_dir = hdf5_runtime_cache_dir
+    cache_key = None
+    if use_cache:
+        cache_key = _freeze_for_cache((
+            gridnames,
+            pnames,
+            np.asarray(limits, dtype=float),
+            [_normalise_photband_name(name) for name in photbands],
+            grid_variables,
+            reddening_law,
+            float(reddening_Rv),
+            int(reddening_case1),
+            bool(hdf5_preload),
+            float(hdf5_preload_max_gb),
+            bool(hdf5_walker_cache),
+            runtime_cache_dir,
+        ))
+        if cache_key in _GRID_CACHE:
+            return _GRID_CACHE[cache_key]
+
     pnames = list(pnames)
     grids = []
     for i, name in enumerate(gridnames):
@@ -736,8 +2103,24 @@ def load_grids(gridnames, pnames, limits, photbands,
                 name,
                 variables=variables,
                 ranges=ranges,
+                preload=hdf5_preload,
+                preload_max_gb=hdf5_preload_max_gb,
+                allow_walker_cache=hdf5_walker_cache,
+                runtime_cache_dir=runtime_cache_dir,
             ))
         else:
+            shared = _shared_fits_grid(
+                name,
+                variables,
+                ranges,
+                photbands,
+                reddening_law=reddening_law,
+                reddening_rv=reddening_Rv,
+                reddening_case1=reddening_case1,
+            )
+            if shared is not None:
+                grids.append(shared)
+                continue
             axis_values, grid_pars, pixelgrid, grid_names = prepare_grid(
                 photbands, name,
                 variables=variables,
@@ -745,14 +2128,20 @@ def load_grids(gridnames, pnames, limits, photbands,
                 reddening_law=reddening_law,
                 reddening_Rv=reddening_Rv,
                 reddening_case1=reddening_case1,
+                runtime_cache_dir=runtime_cache_dir,
             )
 
             grids.append([axis_values, pixelgrid, grid_names])
 
+    if cache_key is not None:
+        _GRID_CACHE[cache_key] = grids
     return grids
 
 
-def prepare_hdf5_grid(photbands, gridname, variables=None, ranges=None):
+def prepare_hdf5_grid(photbands, gridname, variables=None, ranges=None,
+                      preload=True,
+                      preload_max_gb=DEFAULT_HDF5_PRELOAD_MAX_GB,
+                      allow_walker_cache=True, runtime_cache_dir=None):
     desc = grid_description.get(gridname, {}) if isinstance(gridname, str) else {}
     axes = [str(axis).lower() for axis in desc.get('axes', [])]
     if variables is None:
@@ -769,7 +2158,101 @@ def prepare_hdf5_grid(photbands, gridname, variables=None, ranges=None):
         photbands,
         variables=variables,
         ranges=ranges,
+        preload=preload,
+        preload_max_gb=preload_max_gb,
+        allow_walker_cache=allow_walker_cache,
+        runtime_cache_dir=runtime_cache_dir,
     )
+
+
+def _fits_runtime_cache_identity(runtime_cache_dir, gridname, photbands,
+                                 variables, ranges, reddening_law,
+                                 reddening_rv, reddening_case1):
+    if not runtime_cache_dir:
+        return None, None
+    sources = [
+        {'path': path, 'size': size, 'mtime_ns': mtime}
+        for path, size, mtime in _fits_source_identity(
+            gridname, reddening_law, reddening_rv, reddening_case1,
+        )
+    ]
+    payload = {
+        'format_version': FITS_RUNTIME_CACHE_FORMAT_VERSION,
+        'sources': sources,
+        'gridname': repr(_freeze_for_cache(gridname)),
+        'photbands': [_normalise_photband_name(name) for name in photbands],
+        'variables': [str(name) for name in variables],
+        'ranges': repr(_freeze_for_cache(ranges)),
+        'reddening_law': str(reddening_law),
+        'reddening_rv': float(reddening_rv),
+        'reddening_case1': int(reddening_case1),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    digest = hashlib.sha256(encoded).hexdigest()[:24]
+    root = os.path.abspath(os.path.expanduser(str(runtime_cache_dir)))
+    return payload, os.path.join(root, 'fits_' + digest)
+
+
+def _load_fits_runtime_grid(identity, directory):
+    if directory is None or not os.path.isdir(directory):
+        return None
+    try:
+        with open(os.path.join(directory, 'metadata.json')) as handle:
+            metadata = json.load(handle)
+        if metadata.get('identity') != identity:
+            return None
+        axis_values = [
+            np.load(os.path.join(directory, 'axis_{}.npy'.format(index)),
+                    mmap_mode='r', allow_pickle=False)
+            for index in range(int(metadata['naxes']))
+        ]
+        pixelgrid = np.load(
+            os.path.join(directory, 'pixelgrid.npy'),
+            mmap_mode='r',
+            allow_pickle=False,
+        )
+        grid_names = np.load(
+            os.path.join(directory, 'grid_names.npy'),
+            mmap_mode='r',
+            allow_pickle=False,
+        )
+        if pixelgrid.shape != tuple(metadata['pixelgrid_shape']):
+            return None
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return None
+    return axis_values, None, pixelgrid, grid_names
+
+
+def _write_fits_runtime_grid(identity, directory, axis_values, pixelgrid,
+                             grid_names):
+    if directory is None or os.path.isdir(directory):
+        return False
+    root = os.path.dirname(directory)
+    os.makedirs(root, exist_ok=True)
+    temporary = tempfile.mkdtemp(prefix='.sedforge-fits-cache-', dir=root)
+    try:
+        np.save(os.path.join(temporary, 'pixelgrid.npy'), np.asarray(pixelgrid),
+                allow_pickle=False)
+        np.save(os.path.join(temporary, 'grid_names.npy'), np.asarray(grid_names),
+                allow_pickle=False)
+        for index, axis in enumerate(axis_values):
+            np.save(os.path.join(temporary, 'axis_{}.npy'.format(index)),
+                    np.asarray(axis), allow_pickle=False)
+        metadata = {
+            'identity': identity,
+            'naxes': len(axis_values),
+            'pixelgrid_shape': list(pixelgrid.shape),
+        }
+        with open(os.path.join(temporary, 'metadata.json'), 'w') as handle:
+            json.dump(metadata, handle, sort_keys=True)
+        try:
+            os.rename(temporary, directory)
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        if os.path.isdir(temporary):
+            shutil.rmtree(temporary)
 
 
 def prepare_grid(photbands, gridname,
@@ -778,6 +2261,7 @@ def prepare_grid(photbands, gridname,
                  variables=None, ranges=None,
                  reddening_law='WC2019', reddening_Rv=3.1,
                  reddening_case1=1,
+                 runtime_cache_dir=None,
                  **kwargs):
     fluxes = []
     grid_pars = []
@@ -791,6 +2275,27 @@ def prepare_grid(photbands, gridname,
             'av': avrange,
             'ebv': ebvrange,
         }
+
+    runtime_identity, runtime_directory = _fits_runtime_cache_identity(
+        runtime_cache_dir,
+        gridname,
+        photbands,
+        variables,
+        ranges,
+        reddening_law,
+        reddening_Rv,
+        reddening_case1,
+    )
+    runtime_grid = _load_fits_runtime_grid(runtime_identity, runtime_directory)
+    if runtime_grid is not None:
+        print(
+            "Memory-mapped persistent FITS grid cache for {}: shape {}, {:.3f} GB.".format(
+                gridname,
+                runtime_grid[2].shape,
+                runtime_grid[2].nbytes / 1024.0 ** 3,
+            )
+        )
+        return runtime_grid
 
     for member in _normalise_grid_members(gridname):
         gridfilename = get_grid_file(integrated=True, grid=member['grid'],
@@ -854,10 +2359,18 @@ def prepare_grid(photbands, gridname,
 
     grid_pars = np.hstack(grid_pars)
     flux = np.vstack(fluxes)
-    flux = np.log10(flux)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        flux = np.log10(flux)
 
     # -- create the pixeltype grid
     axis_values, pixelgrid = interpol.create_pixeltypegrid(grid_pars, flux.T)
+    _write_fits_runtime_grid(
+        runtime_identity,
+        runtime_directory,
+        axis_values,
+        pixelgrid,
+        grid_names,
+    )
     return axis_values, grid_pars.T, pixelgrid, grid_names
 
 
@@ -950,6 +2463,11 @@ def get_itable_single(teff=None, logg=None, g=None, av=None, ebv=None, feh=None,
 
         values = interpol.interpolate(p, axis_values, pixelgrid)
 
+        if len(kwargs['grid']) > 3:
+            output_indices = kwargs['grid'][3].get('output_indices')
+            if output_indices is not None:
+                values = values[np.asarray(output_indices, dtype=int)]
+
         # -- switch logarithm to normal
         values = 10 ** values
         flux, Labs = values[:-1], values[-1]
@@ -980,7 +2498,7 @@ def _is_prepared_grid(grid):
     if isinstance(grid, HDF5IntegratedGrid):
         return True
     return (
-        isinstance(grid, (list, tuple)) and len(grid) in (2, 3)
+        isinstance(grid, (list, tuple)) and len(grid) in (2, 3, 4)
         and hasattr(grid[1], 'shape')
     )
 

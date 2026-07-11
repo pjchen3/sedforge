@@ -1,4 +1,5 @@
 import pytest
+import yaml
 from argparse import Namespace
 
 from sedforge import main
@@ -406,6 +407,61 @@ def test_rv_axis_grid_rejects_reddening_rv_setup_key(monkeypatch, tmp_path):
         main.validate_setup(setup)
 
 
+def test_hdf5_grid_rejects_map_initialization(monkeypatch, tmp_path):
+    photfile = tmp_path / 'target.phot'
+    photfile.write_text(
+        'photband flux flux_err\n'
+        'GAIA3E_G 1.0e-12 1.0e-14\n'
+    )
+    monkeypatch.setitem(
+        main.model.grid_description,
+        'rv_grid',
+        {
+            'filename': 'rv_grid/grid',
+            'integrated_format': 'hdf5',
+            'axes': ['teff', 'logg', 'feh', 'rv', 'av'],
+            'supports_feh': True,
+            'supports_rv': True,
+        },
+    )
+    setup = _setup(photfile)
+    setup['grids'] = ['rv_grid']
+    setup['init_method'] = 'map'
+
+    with pytest.raises(ValueError, match='MAP initialization.*HDF5'):
+        main.validate_setup(setup)
+
+
+def test_fits_grid_keeps_map_initialization(monkeypatch, tmp_path):
+    photfile = tmp_path / 'target.phot'
+    photfile.write_text(
+        'photband flux flux_err\n'
+        'GAIA3E_G 1.0e-12 1.0e-14\n'
+    )
+    setup = _setup(photfile)
+    setup['fixed'] = {'feh': 0.0}
+    setup['init_method'] = 'map'
+    calls = {}
+
+    def fake_load_grids(gridnames, pnames, limits, photbands, **kwargs):
+        return ['prepared-fits-grid']
+
+    def fake_mcmc(obs, obs_err, photbands, pnames, limits, grids, **kwargs):
+        calls['init_method'] = kwargs['init_method']
+        samples = main.np.zeros(3, dtype=[(name, 'f8') for name in pnames] + [('chi2', 'f8')])
+        for name in pnames:
+            samples[name] = 1.0
+        return {name: 1.0 for name in samples.dtype.names}, samples
+
+    monkeypatch.setattr(main.model, 'load_grids', fake_load_grids)
+    monkeypatch.setattr(main.mcmc, 'MCMC', fake_mcmc)
+
+    photbands, obs, obs_err = main.get_observations(setup)
+    main.fit_sed(setup, photbands, obs, obs_err)
+
+    assert calls['init_method'] == 'map'
+
+
 def test_fixed_parameter_is_not_sampled_but_is_used_for_grid(monkeypatch, tmp_path):
     photfile = tmp_path / 'target.phot'
     photfile.write_text(
@@ -573,6 +629,35 @@ def test_write_results_keeps_asymmetric_uncertainties(tmp_path):
     assert table.loc[0, 'teff_err_plus'] == 250.0
 
 
+def test_write_results_includes_mcmc_quality_columns(tmp_path):
+    resultfile = tmp_path / 'results.csv'
+    diagnosticsfile = tmp_path / 'diagnostics.yaml'
+    setup = {
+        'resultfile': str(resultfile),
+        'diagnosticsfile': str(diagnosticsfile),
+    }
+    results = {
+        'teff': [6100.0, 6000.0, 100.0, 250.0],
+        '_mcmc_diagnostics': {
+            'status': 'passed',
+            'post_burn_steps': 4000,
+            'nwalkers': 24,
+            'max_split_rhat': 1.01,
+            'mean_acceptance_fraction': 0.32,
+            'min_acceptance_fraction': 0.12,
+            'split_rhat': {'teff': 1.01},
+        },
+    }
+
+    main.write_results(setup, results, None, None, None, None)
+
+    import pandas as pd
+    table = pd.read_csv(resultfile)
+    assert table.loc[0, 'mcmc_status'] == 'passed'
+    assert table.loc[0, 'mcmc_max_split_rhat'] == pytest.approx(1.01)
+    assert yaml.safe_load(diagnosticsfile.read_text())['split_rhat']['teff'] == pytest.approx(1.01)
+
+
 def test_binary_fixed_metallicities_are_available_to_mcmc(monkeypatch, tmp_path):
     photfile = tmp_path / 'target.phot'
     photfile.write_text(
@@ -730,6 +815,63 @@ def test_fixed_parameter_cannot_also_have_a_fit_range(tmp_path):
     photbands, obs, obs_err = main.get_observations(setup)
     with pytest.raises(ValueError, match='both fitted'):
         main.fit_sed(setup, photbands, obs, obs_err)
+
+
+def test_batch_worker_records_elapsed_seconds(monkeypatch, tmp_path):
+    setup_path = tmp_path / 'setup.yaml'
+    setup_path.write_text('objectname: timed_source\n')
+
+    monkeypatch.setattr(
+        main,
+        'run_fit',
+        lambda setup, noplot, make_plots: (
+            {
+                'teff': [5000.0, 5050.0, 100.0, 120.0],
+                '_mcmc_diagnostics': {
+                    'status': 'passed',
+                    'passed': True,
+                    'max_split_rhat': 1.02,
+                    'hdf5_cache_reused_at_fit_start': True,
+                    'hdf5_cache': {'fallback_points': 0, 'estimate_gb': 0.8},
+                },
+            },
+            None,
+            None,
+            None,
+        ),
+    )
+    clock = iter([10.0, 12.5])
+    monkeypatch.setattr(main.time, 'perf_counter', lambda: next(clock))
+    main._batch_worker_init(None, str(tmp_path), False, True, 1)
+
+    summary = main._batch_worker_fit((1, {'setup_file': str(setup_path)}))
+
+    assert summary['status'] == 'ok'
+    assert summary['elapsed_seconds'] == pytest.approx(2.5)
+    assert summary['teff'] == 5050.0
+    assert summary['mcmc_status'] == 'passed'
+    assert summary['mcmc_hdf5_cache_reused_at_fit_start'] is True
+    assert summary['mcmc_hdf5_cache_fallback_points'] == 0
+
+
+def test_batch_resolved_setups_are_reused_after_fork_initialization(tmp_path):
+    setup_path = tmp_path / 'setup.yaml'
+    setup_path.write_text('objectname: original\n')
+    row = {'setup_file': str(setup_path)}
+
+    main._batch_worker_init(None, str(tmp_path), False, True, 1)
+    first = main._batch_task_setup(1, row)
+    resolved = main._BATCH_CONTEXT['resolved_setups']
+    setup_path.write_text('objectname: changed\n')
+
+    main._batch_worker_init(
+        None, str(tmp_path), False, True, 1,
+        resolved_setups=resolved,
+    )
+    second = main._batch_task_setup(1, row)
+
+    assert second is first
+    assert second['objectname'] == 'original'
 
 
 def test_photometry_selectors_match_underscore_filter_names():

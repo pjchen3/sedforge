@@ -36,3 +36,31 @@ def test_setup_to_readable_yaml_keeps_sections_and_round_trips():
     assert loaded['limits'] == setup['limits']
     assert loaded['fixed'] == setup['fixed']
     assert loaded['priors'] == setup['priors']
+
+
+def test_setup_to_readable_yaml_keeps_grid_rescue_controls():
+    setup = {
+        'objectname': 'rescue',
+        'photometryfile': 'rescue.phot',
+        'grids': ['newera_alpha0_rv005'],
+        'pnames': ['teff'],
+        'limits': [[3000.0, 8000.0]],
+        'fixed': {},
+        'priors': {},
+        'init_grid_rescue': True,
+        'init_grid_rescue_chi2_threshold': 40.0,
+        'init_grid_rescue_cache_max_gb': 2.0,
+        'init_grid_rescue_maxiter': 80,
+        'init_grid_rescue_popsize': 12,
+    }
+
+    loaded = yaml.safe_load(setup_to_readable_yaml(setup))
+
+    for key in (
+        'init_grid_rescue',
+        'init_grid_rescue_chi2_threshold',
+        'init_grid_rescue_cache_max_gb',
+        'init_grid_rescue_maxiter',
+        'init_grid_rescue_popsize',
+    ):
+        assert loaded[key] == setup[key]

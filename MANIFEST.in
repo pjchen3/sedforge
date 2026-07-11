@@ -1,4 +1,6 @@
 include README.md
+include README.zh-CN.md
+include CHANGELOG.md
 include LICENSE
 include CITATION.cff
 include pyproject.toml
@@ -10,6 +12,7 @@ include sedforge/catalogs.default.yaml
 recursive-include sedforge/transmission_curves *.dat
 recursive-include sedforge/tests *.py
 recursive-include scripts *.py
+recursive-include docs *.md *.png
 
 prune .pytest_cache
 prune build

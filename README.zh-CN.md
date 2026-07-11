@@ -54,8 +54,8 @@ python -m pip install ".[hdf5]"        # HDF5 模型网格支持
 [doi:10.5281/zenodo.20520723](https://doi.org/10.5281/zenodo.20520723)。
 如果只运行下面 `ck_all` 的 Quick Start，至少需要下载 integrated-grid archive。
 如果希望生成带连续模型光谱的 SED 图，还需要下载 spectral-cache archive。
-只有在使用 Cepheid `Rv` 网格 `ck03_cepheid_rv` 时，才需要下载对应的 HDF5
-archive，并安装 `hdf5` extra。
+只有在需要拟合或固定 `Rv`、并使用 `ck03_rv` 或 `newera_alpha0_rv` 这类
+HDF5 Rv 网格时，才需要下载对应的 HDF5 archive，并安装 `hdf5` extra。
 
 把需要的 archive 解压到同一个上级目录中，让它们合并成同一个 `sed_models/`
 目录。模型网格目录通过环境变量 `SEDFORGE_MODELS` 指定：
@@ -71,6 +71,8 @@ sed_models/
   grid_description.yaml
   raw/              # 原始模型光谱
   integrated/       # 通过滤光片积分后的拟合网格
+  ck03_rv/          # 可选：带显式 Rv 轴的 HDF5 网格
+  newera_alpha0_rv/ # 可选：带显式 Rv 轴的 HDF5 网格
   spectral_cache/   # 只用于绘图的连续光谱缓存
 ```
 
@@ -220,13 +222,13 @@ Git 仓库中，应从数据发布页面下载，或由用户在本地自行生�
 
 - Castelli & Kurucz 2003：包括 `ckm25`、`ckm20`、`ckm15`、`ckm10`、
   `ckm05`、`ckp00`、`ckp02`、`ckp05`，以及合并后的 `ck_all`
-  金属丰度 stack；Cepheid 相关工作还可以使用带显式 `Rv` 和 `Av` 轴的
-  HDF5 网格 `ck03_cepheid_rv`。
+  金属丰度 stack；HDF5 网格 `ck03_rv` 带显式 `Rv` 和 `Av` 轴。
 - TLUSTY/SYNSPEC 热星模型：包括 `tlusty00`、`tlusty01`、`tlusty02`、
   `tlusty05`、`tlusty10`、`tlusty20` 和 `tlusty_all`；非零金属丰度
   stack 中使用 `feh = log10(Z/Zsun)`。
 - PHOENIX NewEra V3 LowRes alpha=0 光谱：对应 `newera_alpha0`，带真实
-  `[Fe/H]` 网格轴。
+  `[Fe/H]` 网格轴；HDF5 网格 `newera_alpha0_rv` 还带显式 `Rv` 和 `Av`
+  轴。
 - Koester DA 白矮星光谱：对应 `koester2`。
 - TMAP H+He 光谱：对应 `tmap_he000` 到 `tmap_he100`，每个网格使用固定
   helium mass fraction。
@@ -322,8 +324,24 @@ reddening_case1: 1
 不要在 `ck_all`、`newera_alpha0`、`tlusty_all`、`koester2` 或 `blackbody`
 这类网格的 `pnames` 中放 `rv`。
 
-Cepheid 相关工作可以使用特殊 HDF5 网格 `ck03_cepheid_rv`，该网格有显式
-`rv` 轴。此时可以把 `rv` 作为拟合参数，或在 `fixed:` 中固定。
+HDF5 网格 `ck03_rv` 和 `newera_alpha0_rv` 有显式 `rv` 轴。此时应从 setup
+中移除 `reddening_Rv`/`Rv`，并把 `rv` 作为拟合参数，或在 `fixed:` 中固定：
+
+```yaml
+grids: [ck03_rv]
+pnames: [teff, logg, feh, rad, distance, av, rv]
+limits:
+  - [3500, 50000]     # teff, K
+  - [0.0, 5.0]        # logg, dex
+  - [-2.5, 0.5]       # [Fe/H], dex
+  - [0.05, 500.0]     # radius, Rsun
+  - [100, 100000]     # distance, pc
+  - [0.0, 4.0]        # Av, mag
+  - [2.0, 5.0]        # Rv
+```
+
+如果使用 `newera_alpha0_rv`，`rv` 的写法相同，但参数范围应换成 NewEra 的
+覆盖范围，例如 `teff = 2300..12000 K`、`logg = 0..6`、`[Fe/H] = -2.5..0.5`。
 
 内置滤光片曲线由 `filter_svo_map.dat` 和
 [SVO Filter Profile Service](https://svo2.cab.inta-csic.es/theory/fps/) 生成。
@@ -461,6 +479,76 @@ fixed:
 三组分拟合同理：提供三个网格，并使用后缀 `3` 表示第三个组分的模型参数。
 网格数量必须与组分数量一致。
 
+## 性能、批处理与采样诊断
+
+带显式 `Rv` 轴的 HDF5 网格通常远大于固定 `Rv` 的 FITS 网格。普通拟合默认使用
+以下设置，在不改变精确 likelihood 的前提下控制内存：
+
+```yaml
+init_method: auto
+hdf5_preload: false
+hdf5_walker_cache: true
+hdf5_auto_full_cache_max_gb: 2.0
+vectorized_likelihood: true
+```
+
+对于单组分 HDF5 网格，`init_method: auto` 会选择 grid-aware walker 初始化：
+搜索真实存在的 atmosphere/extinction 节点，解析求解 radius-distance 归一化，
+再用完整 posterior 对候选点排序。如果快速种子明显不合理，默认启用的
+`init_grid_rescue: true` 会执行无梯度全局救援搜索。平滑 FITS 网格仍可使用
+`init_method: map`，但该方法不适用于分段、非矩形 HDF5 网格，因此会被拒绝。
+
+HDF5 缓存只保存 setup 参数范围内真实存在的光谱。走出局部缓存的 proposal 会
+自动回退到精确 HDF5 插值，所以缓存不会限制参数空间或改变 posterior。只有非
+MCMC 代码也需要立即加载网格时，才建议设置 `hdf5_preload: true`。
+
+拟合大量目标时，建议使用 CSV manifest 做 source-level 并行：
+
+```bash
+sedforge batch sources.csv --setup-template template.yaml --workers 8
+```
+
+manifest 可以包含 `setup_file` 列，也可以用各列覆盖 template；带点号的列名用于
+修改嵌套 YAML 项：
+
+```text
+source_id,photometryfile,output_dir,priors.distance,fixed.feh
+src001,phot/src001.phot,runs/src001,"[262.8, 10.0]",0.0
+src002,phot/src002.phot,runs/src002,"[120.5, 5.0]",0.0
+```
+
+batch 默认每个目标使用一个 MCMC worker 且不绘图。同一种单组分网格的任务会在
+fork 前预热所有目标参数范围和波段的并集，让兼容 worker 共享只读缓存。只在少量
+诊断任务中使用 `--plots`；需要时可用 `--shared-grid-cache-max-gb` 调整共享缓存
+上限。
+
+重复运行 batch 时，可以复用持久 runtime cache：
+
+```bash
+sedforge batch sources.csv --setup-template template.yaml --workers 8 \
+  --runtime-grid-cache-dir /path/to/sedforge-runtime-cache
+```
+
+同一路径也可通过 `SEDFORGE_RUNTIME_CACHE` 或 setup 中的
+`runtime_grid_cache_dir` 设置。缓存标识包含源网格元数据、active limits、模型变量
+和波段；过期、不完整或损坏的缓存会自动忽略。
+
+burn-in 后的链会检查 rank-normalized/folded split R-hat、bulk/tail effective
+sample size 和 walker acceptance fraction。诊断信息会写入结果 CSV，也可单独输出
+为 YAML：
+
+```yaml
+convergence_rhat_threshold: 1.05
+convergence_min_acceptance: 0.01
+convergence_min_bulk_ess: 100
+convergence_min_tail_ess: 100
+convergence_action: warn
+diagnosticsfile: target_mcmc_diagnostics.yaml
+```
+
+生产批处理可使用 `convergence_action: error` 拒绝未达到采样质量阈值的链。
+posterior 宽度和边界占比等 identifiability 指标只用于报告，不会让拟合失败。
+
 ## 常用命令
 
 创建起始 setup：
@@ -505,8 +593,10 @@ python -m build
 
 典型输出包括：
 
-- `resultfile`: 一行 CSV，包含 median 值以及 16th/84th percentile uncertainty；
+- `resultfile`: 一行 CSV，包含 median 值、16th/84th percentile uncertainty，
+  以及 `mcmc_status`、`mcmc_max_split_rhat` 等采样质量字段；
 - `datafile`: FITS table 格式的 accepted MCMC samples；
+- `diagnosticsfile`（可选）：包含收敛、初始化和网格缓存诊断的 YAML 文件；
 - SED plot: 观测 flux 和最佳/percentile 模型 SED；
 - corner plot: 采样参数的 posterior distributions。
 

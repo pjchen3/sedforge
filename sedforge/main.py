@@ -1,5 +1,10 @@
 import os
 import re
+import csv
+import copy
+import time
+import traceback
+import warnings
 
 import yaml
 import argparse
@@ -20,6 +25,7 @@ PHOTOMETRY_COLUMNS = MAG_PHOTOMETRY_COLUMNS
 MAG_TYPE_COLUMNS = ('mag_type', 'magnitude_type')
 MAG_ZP_OFFSET_COLUMNS = ('mag_zp_offset', 'zp_offset', 'mag_offset')
 LEGACY_PHOTOMETRY_KEYS = ('photband_index', 'obs_index', 'err_index')
+_MAP_INITIALIZATION_METHODS = ('map', 'best', 'optimize', 'optimise')
 
 
 def _normalise_fixed_parameters(setup):
@@ -68,6 +74,26 @@ def _reject_reddening_rv_for_rv_grids(setup):
             "Grids with an explicit 'rv' axis fit/use Rv as a model parameter. "
             "Remove setup key 'reddening_Rv'/'Rv' and put 'rv' in pnames/limits "
             "or fixed."
+        )
+
+
+def _initialization_method(setup):
+    """Return the requested walker initializer, preserving the legacy alias."""
+    return str(setup.get('init_method', setup.get('initialization', 'auto'))).lower()
+
+
+def _reject_map_initialization_for_hdf5_grids(setup):
+    """L-BFGS-B MAP initialization is unsafe on piecewise HDF5 grids."""
+    if _initialization_method(setup) not in _MAP_INITIALIZATION_METHODS:
+        return
+
+    gridnames = setup.get('grids', [])
+    if model.uses_hdf5_integrated_grid(gridnames):
+        raise ValueError(
+            "MAP initialization uses L-BFGS-B and is disabled for HDF5 integrated "
+            "grids because their likelihood can be piecewise and non-rectangular. "
+            "Use init_method: auto or init_method: grid for the grid-aware "
+            "initializer."
         )
 
 
@@ -768,6 +794,7 @@ def validate_setup(setup):
     _reject_retired_setup_keys(setup)
     _reject_legacy_ebv_setup_parameter(setup)
     _reject_reddening_rv_for_rv_grids(setup)
+    _reject_map_initialization_for_hdf5_grids(setup)
 
     _normalise_fixed_parameters(setup)
     if 'error_model' in setup and setup['error_model'] is not None:
@@ -791,11 +818,12 @@ def validate_setup(setup):
     return True
 
 
-def fit_sed(setup, photbands, obs, obs_err):
-
+def _prepare_fit_parameters(setup):
+    """Validate physical parameters before any model-grid I/O."""
     _reject_retired_setup_keys(setup)
     _reject_legacy_ebv_setup_parameter(setup)
     _reject_reddening_rv_for_rv_grids(setup)
+    _reject_map_initialization_for_hdf5_grids(setup)
 
     # -- pars limits
     raw_pnames = list(setup['pnames'])
@@ -820,6 +848,45 @@ def fit_sed(setup, photbands, obs, obs_err):
         fixed_variables,
         setup.get('grid_variables', None),
     )
+
+    return pnames, limits, fixed_variables
+
+
+def _load_fit_grids(setup, photbands, pnames, limits, fixed_variables):
+    """Construct grids after setup-level parameter and prior validation."""
+    gridnames = setup['grids']
+    grid_pnames, grid_limits = _parameters_for_grid(pnames, limits, fixed_variables)
+    grids = model.load_grids(gridnames, grid_pnames, grid_limits, photbands,
+                             grid_variables=setup.get('grid_variables', None),
+                             reddening_law=setup.get('reddening_law', 'WC2019'),
+                             reddening_Rv=setup.get('reddening_Rv',
+                                                    setup.get('Rv', 3.1)),
+                             reddening_case1=setup.get('reddening_case1',
+                                                       setup.get('case1', 1)),
+                             use_cache=setup.get('grid_cache', True),
+                             hdf5_preload=setup.get('hdf5_preload', False),
+                             hdf5_preload_max_gb=setup.get(
+                                 'hdf5_preload_max_gb',
+                                 model.DEFAULT_HDF5_PRELOAD_MAX_GB,
+                             ),
+                             hdf5_walker_cache=setup.get('hdf5_walker_cache', True),
+                             hdf5_runtime_cache_dir=setup.get(
+                                 'hdf5_runtime_cache_dir',
+                                 os.environ.get('SEDFORGE_RUNTIME_CACHE'),
+                             ),
+                             runtime_cache_dir=setup.get(
+                                 'runtime_grid_cache_dir',
+                                 setup.get(
+                                     'hdf5_runtime_cache_dir',
+                                     os.environ.get('SEDFORGE_RUNTIME_CACHE'),
+                                 ),
+                             ))
+    return gridnames, grids
+
+
+def fit_sed(setup, photbands, obs, obs_err):
+
+    pnames, limits, fixed_variables = _prepare_fit_parameters(setup)
 
     # -- Gaussian priors on sampled parameters
     priors = _normalise_priors_for_fit(
@@ -850,22 +917,50 @@ def fit_sed(setup, photbands, obs, obs_err):
         for group, value in error_model['fixed_fractions'].items():
             print("\t {} = {}".format(group, value))
 
-    # -- pars grid
-    gridnames = setup['grids']
-    grid_pnames, grid_limits = _parameters_for_grid(pnames, limits, fixed_variables)
-    grids = model.load_grids(gridnames, grid_pnames, grid_limits, photbands,
-                             grid_variables=setup.get('grid_variables', None),
-                             reddening_law=setup.get('reddening_law', 'WC2019'),
-                             reddening_Rv=setup.get('reddening_Rv',
-                                                    setup.get('Rv', 3.1)),
-                             reddening_case1=setup.get('reddening_case1',
-                                                       setup.get('case1', 1)))
+    gridnames, grids = _load_fit_grids(
+        setup, photbands, pnames, limits, fixed_variables,
+    )
 
     # -- pars mcmc setup
     nwalkers = setup.get('nwalkers', 24)
     nsteps = setup.get('nsteps', 4000)
     nrelax = setup.get('nrelax', 500)
+    nworkers = setup.get('nworkers', setup.get('threads', 1))
     a = setup.get('a', 10)
+    init_method = _initialization_method(setup)
+    init_ntries = setup.get('init_ntries', 8)
+    init_spread = setup.get('init_spread', 1e-3)
+    init_grid_max_spectra = setup.get('init_grid_max_spectra', 12000)
+    init_grid_rv_points = setup.get('init_grid_rv_points', 7)
+    init_grid_av_points = setup.get('init_grid_av_points', 11)
+    init_grid_top_candidates = setup.get('init_grid_top_candidates', 256)
+    init_grid_max_modes = setup.get('init_grid_max_modes', 6)
+    init_grid_min_separation = setup.get('init_grid_min_separation', 0.05)
+    init_max_delta_logprob = setup.get('init_max_delta_logprob', 25.0)
+    init_grid_rescue = setup.get('init_grid_rescue', True)
+    init_grid_rescue_chi2_threshold = setup.get(
+        'init_grid_rescue_chi2_threshold', None)
+    init_grid_rescue_cache_max_gb = setup.get(
+        'init_grid_rescue_cache_max_gb', 2.0)
+    init_grid_rescue_maxiter = setup.get('init_grid_rescue_maxiter', 80)
+    init_grid_rescue_popsize = setup.get('init_grid_rescue_popsize', 12)
+    hdf5_walker_cache_padding = setup.get('hdf5_walker_cache_padding', 4)
+    hdf5_walker_cache_max_gb = setup.get('hdf5_walker_cache_max_gb', 0.25)
+    hdf5_walker_cache_refresh = setup.get('hdf5_walker_cache_refresh', 0)
+    hdf5_walker_cache_max_modes = setup.get('hdf5_walker_cache_max_modes', 6)
+    hdf5_walker_cache_envelope_max_gb = setup.get(
+        'hdf5_walker_cache_envelope_max_gb', 2.0)
+    hdf5_auto_full_cache_max_gb = setup.get(
+        'hdf5_auto_full_cache_max_gb', 2.0)
+    convergence_rhat_threshold = setup.get('convergence_rhat_threshold', 1.05)
+    convergence_min_acceptance = setup.get('convergence_min_acceptance', 0.01)
+    convergence_min_bulk_ess = setup.get('convergence_min_bulk_ess', 100.0)
+    convergence_min_tail_ess = setup.get('convergence_min_tail_ess', 100.0)
+    convergence_action = setup.get('convergence_action', 'warn')
+    autostop = setup.get('autostop', False)
+    autostop_check_interval = setup.get('autostop_check_interval', 200)
+    autostop_tau_factor = setup.get('autostop_tau_factor', 50.0)
+    autostop_tolerance = setup.get('autostop_tolerance', 0.01)
 
     # -- MCMC
     results, samples = mcmc.MCMC(obs, obs_err, photbands,
@@ -874,7 +969,41 @@ def fit_sed(setup, photbands, obs, obs_err):
                                  priors=priors,
                                  error_model=error_model,
                                  nwalkers=nwalkers, nsteps=nsteps, nrelax=nrelax,
-                                 a=a)
+                                 a=a, nworkers=nworkers,
+                                 init_method=init_method,
+                                 init_ntries=init_ntries,
+                                 init_spread=init_spread,
+                                 init_grid_max_spectra=init_grid_max_spectra,
+                                 init_grid_rv_points=init_grid_rv_points,
+                                 init_grid_av_points=init_grid_av_points,
+                                 init_grid_top_candidates=init_grid_top_candidates,
+                                 init_grid_max_modes=init_grid_max_modes,
+                                 init_grid_min_separation=init_grid_min_separation,
+                                 init_max_delta_logprob=init_max_delta_logprob,
+                                 init_grid_rescue=init_grid_rescue,
+                                 init_grid_rescue_chi2_threshold=init_grid_rescue_chi2_threshold,
+                                 init_grid_rescue_cache_max_gb=init_grid_rescue_cache_max_gb,
+                                 init_grid_rescue_maxiter=init_grid_rescue_maxiter,
+                                 init_grid_rescue_popsize=init_grid_rescue_popsize,
+                                 hdf5_walker_cache_padding=hdf5_walker_cache_padding,
+                                 hdf5_walker_cache_max_gb=hdf5_walker_cache_max_gb,
+                                 hdf5_walker_cache_refresh=hdf5_walker_cache_refresh,
+                                 hdf5_walker_cache_max_modes=hdf5_walker_cache_max_modes,
+                                 hdf5_walker_cache_envelope_max_gb=hdf5_walker_cache_envelope_max_gb,
+                                 hdf5_auto_full_cache_max_gb=hdf5_auto_full_cache_max_gb,
+                                 convergence_rhat_threshold=convergence_rhat_threshold,
+                                 convergence_min_acceptance=convergence_min_acceptance,
+                                 convergence_min_bulk_ess=convergence_min_bulk_ess,
+                                 convergence_min_tail_ess=convergence_min_tail_ess,
+                                 convergence_action=convergence_action,
+                                 autostop=autostop,
+                                 autostop_check_interval=autostop_check_interval,
+                                 autostop_tau_factor=autostop_tau_factor,
+                                 autostop_tolerance=autostop_tolerance,
+                                 progress=setup.get('progress', True),
+                                 vectorized_likelihood=setup.get(
+                                     'vectorized_likelihood', True,
+                                 ))
 
     # -- add fixed variables to results dictionary
     for par, val in list(fixed_variables.items()):
@@ -912,6 +1041,8 @@ def write_results(setup, results, samples, obs, obs_err, photbands):
     result_names += [p for p in results if p not in result_names]
 
     for par in result_names:
+        if par.startswith('_') or isinstance(results[par], dict):
+            continue
         if not hasattr(results[par], '__iter__') or len(results[par]) < 4:
             continue
         outpars.append(par)
@@ -921,11 +1052,35 @@ def write_results(setup, results, samples, obs, obs_err, photbands):
         outvals.append(results[par][2])
         outvals.append(results[par][3])
 
+    diagnostics = results.get('_mcmc_diagnostics', {})
+    if isinstance(diagnostics, dict):
+        for name in ('status', 'post_burn_steps', 'nwalkers', 'max_split_rhat',
+                     'mean_acceptance_fraction', 'min_acceptance_fraction',
+                     'min_bulk_ess', 'min_tail_ess',
+                     'initialization_seconds', 'grid_initialization_seconds',
+                     'hdf5_cache_preload_seconds',
+                     'hdf5_walker_cache_preloaded', 'vectorized_likelihood'):
+            if name in diagnostics:
+                outpars.append('mcmc_' + name)
+                outvals.append(diagnostics[name])
+        hdf5_cache = diagnostics.get('hdf5_cache', {})
+        if isinstance(hdf5_cache, dict):
+            for name in ('cached_points', 'invalid_cached_points',
+                         'fallback_points', 'estimate_gb', 'runtime_cache_hit'):
+                if name in hdf5_cache:
+                    outpars.append('mcmc_hdf5_cache_' + name)
+                    outvals.append(hdf5_cache[name])
+
     resultfile = setup.get('resultfile', None)
     if resultfile is not None:
         import pandas as pd
         data = pd.DataFrame(data=[outvals], columns=outpars)
         data.to_csv(resultfile, index=False)
+
+    diagnosticsfile = setup.get('diagnosticsfile', None)
+    if diagnosticsfile is not None and isinstance(diagnostics, dict):
+        with open(diagnosticsfile, 'w') as handle:
+            yaml.safe_dump(diagnostics, handle, sort_keys=False)
 
     datafile = setup.get('datafile', None)
     if datafile is not None:
@@ -1064,6 +1219,20 @@ def plot_results(setup, results, samples, priors, gridnames, obs, obs_err, photb
                 pl.savefig(setup[pindex].get('path', 'distribution.png'), dpi=plot_dpi)
 
 
+def run_fit(setup, noplot=True, make_plots=True):
+    validate_setup(setup)
+    photbands, obs, obs_err = get_observations(setup)
+    results, samples, priors, gridnames = fit_sed(setup, photbands, obs, obs_err)
+    write_results(setup, results, samples, obs, obs_err, photbands)
+    if make_plots:
+        plot_results(setup, results, samples, priors, gridnames, obs, obs_err, photbands)
+        if not noplot:
+            pl.show()
+        else:
+            pl.close('all')
+    return results, samples, priors, gridnames
+
+
 # ====================================================================================================================
 # Command line stuff below.
 
@@ -1141,20 +1310,11 @@ def perform_fit(args):
     setup = yaml.safe_load(ifile)
     ifile.close()
 
-    # -- check if the provided setup is valid and provide some useful feedback to the user if not.
-    validate_setup(setup)
-
-    # -- obtain the observations
-    photbands, obs, obs_err = get_observations(setup)
-
-    # -- perform the SED fit
-    results, samples, priors, gridnames = fit_sed(setup, photbands, obs, obs_err)
-
-    # -- write the results
-    write_results(setup, results, samples, obs, obs_err, photbands)
-
-    # -- create plots
-    plot_results(setup, results, samples, priors, gridnames, obs, obs_err, photbands)
+    results, samples, _priors, _gridnames = run_fit(
+        setup,
+        noplot=noplot,
+        make_plots=True,
+    )
 
     print("================================================================================")
     print("")
@@ -1162,9 +1322,6 @@ def perform_fit(args):
     print("   Par             Best        Pc       emin       emax")
     for p in samples.dtype.names:
         print("   {:10s} = {}   {}   -{}   +{}".format(p, *plotting.format_parameter(p, results[p])))
-
-    if not noplot:
-        pl.show()
 
 
 def check_grids(args):
@@ -1174,6 +1331,487 @@ def check_grids(args):
     print_bands = args.bands
 
     model.check_grids(print_bands=print_bands)
+
+
+def _parse_batch_value(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if text == '':
+            return None
+        try:
+            return yaml.safe_load(text)
+        except yaml.YAMLError:
+            return text
+    return value
+
+
+def _set_nested_value(mapping, dotted_key, value):
+    keys = str(dotted_key).split('.')
+    target = mapping
+    for key in keys[:-1]:
+        if key not in target or target[key] is None:
+            target[key] = {}
+        if not isinstance(target[key], dict):
+            raise ValueError(
+                "Cannot set '{}': '{}' is already a non-dictionary value.".format(
+                    dotted_key,
+                    key,
+                )
+            )
+        target = target[key]
+    target[keys[-1]] = value
+
+
+def _read_batch_manifest(path):
+    with open(path, newline='') as handle:
+        sample = handle.read(4096)
+        handle.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample)
+        except csv.Error:
+            dialect = csv.excel
+        reader = csv.DictReader(handle, dialect=dialect)
+        return [dict(row) for row in reader]
+
+
+def _resolve_setup_paths(setup, base_dir):
+    for key in ('photometryfile',):
+        value = setup.get(key)
+        if value is not None and not os.path.isabs(str(value)):
+            setup[key] = os.path.abspath(os.path.join(base_dir, str(value)))
+
+
+def _setup_from_batch_row(row, template, manifest_dir, index):
+    setup = copy.deepcopy(template)
+    for key, raw_value in row.items():
+        if key in ('setup_file', 'output_dir'):
+            continue
+        value = _parse_batch_value(raw_value)
+        if value is None:
+            continue
+        if key == 'source_id':
+            setup.setdefault('object_name', str(value))
+            continue
+        if '.' in key:
+            _set_nested_value(setup, key, value)
+        else:
+            setup[key] = value
+
+    if 'photometryfile' in setup and not os.path.isabs(str(setup['photometryfile'])):
+        setup['photometryfile'] = os.path.abspath(
+            os.path.join(manifest_dir, str(setup['photometryfile']))
+        )
+
+    output_dir = _parse_batch_value(row.get('output_dir'))
+    if output_dir is not None:
+        output_dir = str(output_dir)
+        if not os.path.isabs(output_dir):
+            output_dir = os.path.abspath(os.path.join(manifest_dir, output_dir))
+        os.makedirs(output_dir, exist_ok=True)
+        name = str(setup.get('object_name', row.get('source_id') or f'source_{index:05d}'))
+        safe_name = re.sub(r'[^A-Za-z0-9_.-]+', '_', name).strip('_') or f'source_{index:05d}'
+        setup.setdefault('resultfile', os.path.join(output_dir, f'{safe_name}_results.csv'))
+        setup.setdefault('datafile', os.path.join(output_dir, f'{safe_name}_samples.fits'))
+
+    return setup
+
+
+_BATCH_CONTEXT = {}
+
+
+def _batch_worker_init(template, manifest_dir, make_plots, noplot,
+                       fit_workers_per_source, resolved_setups=None):
+    for var in (
+            'OMP_NUM_THREADS',
+            'OPENBLAS_NUM_THREADS',
+            'MKL_NUM_THREADS',
+            'VECLIB_MAXIMUM_THREADS',
+            'NUMEXPR_NUM_THREADS',
+    ):
+        os.environ.setdefault(var, '1')
+    _BATCH_CONTEXT.clear()
+    _BATCH_CONTEXT.update({
+        'template': template,
+        'manifest_dir': manifest_dir,
+        'make_plots': make_plots,
+        'noplot': noplot,
+        'fit_workers_per_source': fit_workers_per_source,
+        'resolved_setups': {} if resolved_setups is None else resolved_setups,
+    })
+
+
+def _summary_from_results(row, index, setup, results):
+    summary = {
+        'index': index,
+        'source_id': row.get('source_id', setup.get('object_name', index)),
+        'photometryfile': setup.get('photometryfile', ''),
+        'resultfile': setup.get('resultfile', ''),
+        'datafile': setup.get('datafile', ''),
+        'status': 'ok',
+        'message': '',
+    }
+    for par, values in results.items():
+        if str(par).startswith('_') or isinstance(values, dict):
+            continue
+        if not hasattr(values, '__iter__') or len(values) < 4:
+            continue
+        summary[f'{par}_best'] = values[0]
+        summary[par] = values[1]
+        summary[f'{par}_err_minus'] = values[2]
+        summary[f'{par}_err_plus'] = values[3]
+
+    diagnostics = results.get('_mcmc_diagnostics', {})
+    if isinstance(diagnostics, dict):
+        for name in (
+                'status', 'passed', 'max_split_rhat',
+                'mean_acceptance_fraction', 'min_acceptance_fraction',
+                'min_bulk_ess', 'min_tail_ess',
+                'initialization_seconds', 'grid_initialization_seconds',
+                'hdf5_cache_preload_seconds',
+                'hdf5_cache_preloaded_before_grid_initialization',
+                'hdf5_cache_reused_at_fit_start', 'vectorized_likelihood'):
+            if name in diagnostics:
+                summary[f'mcmc_{name}'] = diagnostics[name]
+        cache = diagnostics.get('hdf5_cache', {})
+        if isinstance(cache, dict):
+            for name in (
+                    'cached_points', 'invalid_cached_points',
+                    'fallback_points', 'estimate_gb', 'runtime_cache_hit'):
+                if name in cache:
+                    summary[f'mcmc_hdf5_cache_{name}'] = cache[name]
+    return summary
+
+
+def _batch_task_setup(index, row):
+    """Resolve one manifest row into the same setup used by a source worker."""
+    resolved = _BATCH_CONTEXT.setdefault('resolved_setups', {})
+    if index in resolved:
+        return resolved[index]
+
+    setup_file = _parse_batch_value(row.get('setup_file'))
+    if setup_file is not None:
+        setup_file = str(setup_file)
+        if not os.path.isabs(setup_file):
+            setup_file = os.path.abspath(
+                os.path.join(_BATCH_CONTEXT['manifest_dir'], setup_file)
+            )
+        with open(setup_file) as handle:
+            setup = yaml.safe_load(handle)
+        _resolve_setup_paths(setup, os.path.dirname(setup_file))
+        resolved[index] = setup
+        return setup
+
+    if _BATCH_CONTEXT['template'] is None:
+        raise ValueError(
+            "Batch rows without a setup_file require --setup-template."
+        )
+    setup = _setup_from_batch_row(
+        row,
+        _BATCH_CONTEXT['template'],
+        _BATCH_CONTEXT['manifest_dir'],
+        index,
+    )
+    resolved[index] = setup
+    return setup
+
+
+def _prewarm_batch_shared_grid_cache(tasks, max_gb=4.0, runtime_cache_dir=None):
+    """Load one union-of-limits integrated grid before source workers fork."""
+    common_signature = None
+    common_gridname = None
+    common_photbands = None
+    common_variables = None
+    common_format = None
+    common_reddening = None
+    union_ranges = {}
+
+    for index, row in tasks:
+        setup = _batch_task_setup(index, row)
+        if not setup.get('grid_cache', True):
+            print("Shared batch grid cache skipped because grid caching is disabled.")
+            return False
+        validate_setup(setup)
+        photbands, _obs, _obs_err = get_observations(setup)
+        pnames, limits, fixed_variables = _prepare_fit_parameters(setup)
+        raw_gridnames = setup['grids']
+        gridnames = [raw_gridnames] if isinstance(raw_gridnames, str) else list(raw_gridnames)
+        if len(gridnames) != 1:
+            print("Shared batch grid cache is available for one component only.")
+            return False
+        integrated_format = model._grid_integrated_format(gridnames[0])
+        if integrated_format == 'hdf5' and not setup.get('hdf5_walker_cache', True):
+            print("Shared HDF5 batch cache skipped because hdf5_walker_cache is disabled.")
+            return False
+
+        grid_pnames, grid_limits = _parameters_for_grid(
+            pnames, limits, fixed_variables,
+        )
+        variables = model._variables_for_component(
+            setup.get('grid_variables', None),
+            gridnames[0],
+            0,
+            grid_pnames,
+            '',
+        )
+        ranges = {
+            variable: model._range_for(variable, grid_pnames, grid_limits, '')
+            for variable in variables
+        }
+        signature = (
+            str(gridnames[0]),
+            tuple(str(name) for name in variables),
+            integrated_format,
+            str(setup.get('reddening_law', 'WC2019')),
+            float(setup.get('reddening_Rv', setup.get('Rv', 3.1))),
+            int(setup.get('reddening_case1', setup.get('case1', 1))),
+        )
+        if common_signature is None:
+            common_signature = signature
+            common_gridname = gridnames[0]
+            common_photbands = []
+            common_variables = list(variables)
+            common_format = integrated_format
+            common_reddening = signature[3:]
+        elif signature != common_signature:
+            print(
+                "Shared batch grid cache skipped because rows use different "
+                "grids or model variables."
+            )
+            return False
+
+        for photband in photbands:
+            if photband not in common_photbands:
+                common_photbands.append(str(photband))
+
+        for name, bounds in ranges.items():
+            low, high = map(float, bounds)
+            if name not in union_ranges:
+                union_ranges[name] = [low, high]
+            else:
+                union_ranges[name][0] = min(union_ranges[name][0], low)
+                union_ranges[name][1] = max(union_ranges[name][1], high)
+
+    if common_signature is None:
+        return False
+    cache_limit = 4.0 if max_gb is None else float(max_gb)
+    if common_format == 'hdf5':
+        shared_grid = model.prepare_hdf5_grid(
+            common_photbands,
+            common_gridname,
+            variables=common_variables,
+            ranges=union_ranges,
+            preload=False,
+            allow_walker_cache=True,
+            runtime_cache_dir=runtime_cache_dir,
+        )
+        loaded = shared_grid.preload_full_active_subgrid(max_gb=cache_limit)
+        if loaded:
+            shared_grid.register_active_cache_as_shared()
+        shared_grid.close()
+        estimate_gb = shared_grid.cache_diagnostics()['estimate_gb'] if loaded else 0.0
+    else:
+        reddening_law, reddening_rv, reddening_case1 = common_reddening
+        axis_values, _grid_pars, pixelgrid, grid_names = model.prepare_grid(
+            common_photbands,
+            common_gridname,
+            variables=common_variables,
+            ranges=union_ranges,
+            reddening_law=reddening_law,
+            reddening_Rv=reddening_rv,
+            reddening_case1=reddening_case1,
+            runtime_cache_dir=runtime_cache_dir,
+        )
+        estimate_gb = pixelgrid.nbytes / 1024.0 ** 3
+        loaded = estimate_gb <= cache_limit
+        if loaded:
+            model.register_shared_fits_grid(
+                common_gridname,
+                common_variables,
+                common_photbands,
+                axis_values,
+                pixelgrid,
+                grid_names,
+                reddening_law=reddening_law,
+                reddening_rv=reddening_rv,
+                reddening_case1=reddening_case1,
+            )
+        else:
+            print(
+                "Shared FITS union grid is {:.3f} GB, above the {:.3f} GB cap.".format(
+                    estimate_gb, cache_limit,
+                )
+            )
+    if loaded:
+        print(
+            "Prewarmed {:.3f} GB shared batch union grid cache for {} sources; "
+            "workers inherit it through fork.".format(
+                estimate_gb, len(tasks)
+            )
+        )
+    return loaded
+
+
+def _batch_worker_fit(task):
+    index, row = task
+    started = time.perf_counter()
+    try:
+        setup = _batch_task_setup(index, row)
+
+        setup['nworkers'] = int(_BATCH_CONTEXT['fit_workers_per_source'])
+        setup['progress'] = False
+        results, _samples, _priors, _gridnames = run_fit(
+            setup,
+            noplot=_BATCH_CONTEXT['noplot'],
+            make_plots=_BATCH_CONTEXT['make_plots'],
+        )
+        summary = _summary_from_results(row, index, setup, results)
+        summary['elapsed_seconds'] = time.perf_counter() - started
+        return summary
+    except Exception as exc:
+        return {
+            'index': index,
+            'source_id': row.get('source_id', index),
+            'photometryfile': row.get('photometryfile', ''),
+            'resultfile': '',
+            'datafile': '',
+            'status': 'failed',
+            'message': '{}\n{}'.format(exc, traceback.format_exc()),
+            'elapsed_seconds': time.perf_counter() - started,
+        }
+
+
+def _write_batch_summary(rows, path):
+    if path is None:
+        return
+    fieldnames = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with open(path, 'w', newline='') as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def run_batch(args):
+    batch_started = time.perf_counter()
+    manifest = os.path.abspath(args.manifest)
+    manifest_dir = os.path.dirname(manifest)
+    rows = _read_batch_manifest(manifest)
+    if len(rows) == 0:
+        raise ValueError("Batch manifest is empty.")
+
+    template = None
+    if args.setup_template is not None:
+        with open(args.setup_template) as handle:
+            template = yaml.safe_load(handle)
+
+    summary_path = args.summary
+    if summary_path is not None and not os.path.isabs(summary_path):
+        summary_path = os.path.abspath(os.path.join(manifest_dir, summary_path))
+
+    make_plots = bool(args.plots)
+    noplot = True
+    workers = int(args.workers)
+    fit_workers_per_source = int(args.fit_workers_per_source)
+    max_tasks_per_worker = getattr(args, 'max_tasks_per_worker', None)
+    if max_tasks_per_worker is not None:
+        max_tasks_per_worker = int(max_tasks_per_worker)
+        if max_tasks_per_worker < 1:
+            raise ValueError("--max-tasks-per-worker must be at least 1.")
+    tasks = list(enumerate(rows, start=1))
+
+    _batch_worker_init(
+        template,
+        manifest_dir,
+        make_plots,
+        noplot,
+        fit_workers_per_source,
+    )
+
+    shared_grid_cache = bool(getattr(args, 'shared_grid_cache', True))
+    shared_grid_cache_max_gb = getattr(args, 'shared_grid_cache_max_gb', None)
+    runtime_grid_cache_dir = getattr(args, 'runtime_grid_cache_dir', None)
+    shared_grid_cache_preloaded = False
+    shared_grid_cache_preload_seconds = 0.0
+    if workers > 1 and shared_grid_cache:
+        shared_grid_cache_started = time.perf_counter()
+        try:
+            shared_grid_cache_preloaded = _prewarm_batch_shared_grid_cache(
+                tasks,
+                max_gb=shared_grid_cache_max_gb,
+                runtime_cache_dir=runtime_grid_cache_dir,
+            )
+        except Exception as exc:
+            warnings.warn(
+                "Shared batch grid-cache prewarm failed ({}); continuing with "
+                "per-worker loading.".format(exc),
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        shared_grid_cache_preload_seconds = (
+            time.perf_counter() - shared_grid_cache_started
+        )
+        print(
+            "Shared batch cache preparation completed in {:.2f} s (loaded={}).".format(
+                shared_grid_cache_preload_seconds,
+                shared_grid_cache_preloaded,
+            )
+        )
+
+    summaries = []
+    if workers <= 1:
+        for task in tasks:
+            summary = _batch_worker_fit(task)
+            summaries.append(summary)
+            print("[{}/{}] {} {}".format(
+                len(summaries),
+                len(tasks),
+                summary['status'],
+                summary.get('source_id', summary['index']),
+            ))
+    else:
+        from multiprocessing import get_context
+
+        with get_context('fork').Pool(
+                processes=workers,
+                initializer=_batch_worker_init,
+                initargs=(template, manifest_dir, make_plots, noplot,
+                          fit_workers_per_source,
+                          _BATCH_CONTEXT.get('resolved_setups', {})),
+                maxtasksperchild=max_tasks_per_worker) as pool:
+            for summary in pool.imap_unordered(_batch_worker_fit, tasks):
+                summaries.append(summary)
+                print("[{}/{}] {} {}".format(
+                    len(summaries),
+                    len(tasks),
+                    summary['status'],
+                    summary.get('source_id', summary['index']),
+                ), flush=True)
+
+    batch_elapsed_seconds = time.perf_counter() - batch_started
+    for summary in summaries:
+        summary['batch_shared_grid_cache_preloaded'] = shared_grid_cache_preloaded
+        summary['batch_shared_grid_cache_preload_seconds'] = (
+            shared_grid_cache_preload_seconds
+        )
+        summary['batch_elapsed_seconds'] = batch_elapsed_seconds
+    summaries.sort(key=lambda item: int(item['index']))
+    _write_batch_summary(summaries, summary_path)
+    nfail = sum(row['status'] != 'ok' for row in summaries)
+    print(
+        "Batch complete in {:.2f} s: {} ok, {} failed.".format(
+            batch_elapsed_seconds,
+            len(summaries) - nfail,
+            nfail,
+        )
+    )
+    if summary_path is not None:
+        print("Wrote batch summary to {}".format(summary_path))
 
 
 def create_photometry(args):
@@ -1237,6 +1875,80 @@ def main():
     grid_parser.add_argument('--bands', dest='bands', action='store_true',
                              help="List the photometric bands included in the integrated grids.")
     grid_parser.set_defaults(func=check_grids)
+
+    # --batch--
+    batch_parser = subparsers.add_parser(
+        'batch',
+        help='Fit many SEDs with source-level parallelism',
+    )
+    batch_parser.add_argument(
+        'manifest',
+        help='CSV/TSV table. Use a setup_file column, or provide --setup-template '
+             'and one row per source with photometryfile plus optional setup overrides.',
+    )
+    batch_parser.add_argument(
+        '--setup-template',
+        help='YAML setup used as the base for rows that do not provide setup_file.',
+    )
+    batch_parser.add_argument(
+        '--workers',
+        type=int,
+        default=1,
+        help='Number of sources to fit in parallel. Default: 1.',
+    )
+    batch_parser.add_argument(
+        '--fit-workers-per-source',
+        type=int,
+        default=1,
+        help='Inner MCMC workers per source. Default: 1; keep this at 1 for large batches.',
+    )
+    batch_parser.add_argument(
+        '--max-tasks-per-worker',
+        type=int,
+        default=None,
+        help='Recycle a source worker after this many fits. Use 1 for very large '
+             'HDF5 active subgrids so memory is returned between sources.',
+    )
+    shared_cache_group = batch_parser.add_mutually_exclusive_group()
+    shared_cache_group.add_argument(
+        '--shared-grid-cache',
+        dest='shared_grid_cache',
+        action='store_true',
+        help='Preload one read-only HDF5 active grid before forking source workers '
+             '(default). Matching source setups share its physical memory.',
+    )
+    shared_cache_group.add_argument(
+        '--no-shared-grid-cache',
+        dest='shared_grid_cache',
+        action='store_false',
+        help='Disable parent-process integrated-grid cache prewarming.',
+    )
+    batch_parser.set_defaults(shared_grid_cache=True)
+    batch_parser.add_argument(
+        '--shared-grid-cache-max-gb',
+        type=float,
+        default=4.0,
+        help='Parent union-cache cap in GB. Default: 4.0. This cache is loaded '
+             'once and its physical pages are shared by forked source workers.',
+    )
+    batch_parser.add_argument(
+        '--runtime-grid-cache-dir',
+        default=os.environ.get('SEDFORGE_RUNTIME_CACHE'),
+        help='Optional directory for persistent memory-mapped integrated-grid runtime '
+             'caches. The SEDFORGE_RUNTIME_CACHE environment variable provides '
+             'the default.',
+    )
+    batch_parser.add_argument(
+        '--plots',
+        action='store_true',
+        help='Also generate plots for each source. Disabled by default for speed.',
+    )
+    batch_parser.add_argument(
+        '--summary',
+        default='batch_summary.csv',
+        help='Output CSV summary path. Default: batch_summary.csv beside the manifest.',
+    )
+    batch_parser.set_defaults(func=run_batch)
 
     # --photometry--
     phot_parser = subparsers.add_parser(

@@ -101,12 +101,31 @@ def setup_to_readable_yaml(setup):
         _add_mapping(lines, 'error_model', setup['error_model'])
 
     _add_section(lines, 'MCMC Sampler')
-    for key in ('nwalkers', 'nsteps', 'nrelax', 'a', 'percentiles'):
+    for key in (
+        'nwalkers', 'nsteps', 'nrelax', 'a', 'init_method', 'init_ntries',
+        'init_spread', 'init_grid_max_spectra', 'init_grid_rv_points',
+        'init_grid_av_points', 'init_grid_top_candidates', 'init_grid_max_modes',
+        'init_grid_min_separation', 'init_max_delta_logprob',
+        'init_grid_rescue', 'init_grid_rescue_chi2_threshold',
+        'init_grid_rescue_cache_max_gb', 'init_grid_rescue_maxiter',
+        'init_grid_rescue_popsize',
+        'hdf5_preload', 'hdf5_preload_max_gb', 'hdf5_walker_cache',
+        'hdf5_walker_cache_padding', 'hdf5_walker_cache_max_gb',
+        'hdf5_walker_cache_envelope_max_gb', 'hdf5_walker_cache_refresh',
+        'hdf5_walker_cache_max_modes', 'hdf5_auto_full_cache_max_gb',
+        'hdf5_runtime_cache_dir',
+        'runtime_grid_cache_dir',
+        'progress', 'vectorized_likelihood',
+        'convergence_rhat_threshold', 'convergence_min_acceptance',
+        'convergence_min_bulk_ess', 'convergence_min_tail_ess',
+        'convergence_action', 'autostop', 'autostop_check_interval',
+        'autostop_tau_factor', 'autostop_tolerance', 'percentiles',
+    ):
         if key in setup:
             _add_mapping(lines, key, setup[key])
 
     _add_section(lines, 'Outputs')
-    for key in ('resultfile', 'datafile'):
+    for key in ('resultfile', 'datafile', 'diagnosticsfile'):
         if key in setup:
             _add_mapping(lines, key, setup[key])
     for key in _plot_keys(setup):
