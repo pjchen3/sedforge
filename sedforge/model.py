@@ -479,6 +479,44 @@ def _grid_supports_feh(gridname):
     return False
 
 
+def grid_has_nonrectangular_coverage(grid):
+    """Return whether a grid has missing atmosphere combinations.
+
+    NewEra is distributed on a non-rectangular Teff/logg/[Fe/H] domain.  Its
+    prepared FITS representation records missing combinations as non-finite
+    pixels, while its HDF5 representation stores only existing spectra.
+    """
+    if isinstance(grid, HDF5IntegratedGrid):
+        return True
+    if _is_prepared_grid(grid):
+        metadata = grid[3] if len(grid) > 3 and isinstance(grid[3], dict) else {}
+        if 'non_rectangular' in metadata:
+            return bool(metadata['non_rectangular'])
+        pixelgrid = grid[1]
+        if not hasattr(pixelgrid, 'shape') or len(pixelgrid.shape) < 2:
+            return False
+        return not bool(np.all(np.isfinite(pixelgrid[..., 0])))
+    if isinstance(grid, dict):
+        if 'members' in grid:
+            return any(
+                grid_has_nonrectangular_coverage(member)
+                for member in grid['members']
+            )
+        if 'grid' in grid:
+            return grid_has_nonrectangular_coverage(grid['grid'])
+        return bool(grid.get('non_rectangular', False))
+    if isinstance(grid, str):
+        desc = grid_description.get(grid, {})
+        return (
+            _grid_integrated_format(grid) == 'hdf5'
+            or bool(desc.get('non_rectangular', False))
+            or grid.lower().startswith('newera')
+        )
+    if hasattr(grid, '__iter__'):
+        return any(grid_has_nonrectangular_coverage(item) for item in grid)
+    return False
+
+
 def grid_has_axis(gridname, axis):
     """Return True when a grid description or integrated file exposes an axis."""
     axis = str(axis).lower()
@@ -629,9 +667,20 @@ def _axis_indices_for_range(axis, requested):
 
 
 def _axis_bounds(axis, value):
-    axis = np.asarray(axis, dtype=float)
+    stored_axis = np.asarray(axis)
+    storage_epsilon = (
+        np.finfo(stored_axis.dtype).eps
+        if np.issubdtype(stored_axis.dtype, np.floating)
+        else np.finfo(float).eps
+    )
+    axis = np.asarray(stored_axis, dtype=float)
     value = float(value)
-    atol = max(1e-10, 1e-8 * max(1.0, abs(axis[0]), abs(axis[-1])))
+    scale = max(1.0, abs(axis[0]), abs(axis[-1]))
+    # HDF5 axes may have been read into float64 after decimal values were
+    # quantized as float32 (for example 6.2 -> 6.199999809...).  A 1e-7
+    # relative endpoint tolerance accepts that representation error while
+    # remaining far below the spacing of supported model axes.
+    atol = max(1e-10, 1e-7 * scale, 4.0 * storage_epsilon * scale)
     if value < axis[0] - atol or value > axis[-1] + atol:
         raise ValueError(
             "Value {} is outside grid axis [{}, {}].".format(
@@ -2012,6 +2061,8 @@ def register_shared_fits_grid(gridname, variables, photbands, axis_values,
         'axis_values': axis_values,
         'pixelgrid': pixelgrid,
         'grid_names': np.asarray(grid_names),
+        'gridname': gridname,
+        'non_rectangular': grid_has_nonrectangular_coverage(gridname),
     }
     _SHARED_FITS_GRIDS.append(entry)
     return True
@@ -2048,6 +2099,8 @@ def _shared_fits_grid(gridname, variables, ranges, photbands,
         metadata = {
             'output_indices': output_indices,
             'shared_union': True,
+            'source_grid': entry['gridname'],
+            'non_rectangular': entry['non_rectangular'],
         }
         return [
             entry['axis_values'],
@@ -2131,7 +2184,15 @@ def load_grids(gridnames, pnames, limits, photbands,
                 runtime_cache_dir=runtime_cache_dir,
             )
 
-            grids.append([axis_values, pixelgrid, grid_names])
+            grids.append([
+                axis_values,
+                pixelgrid,
+                grid_names,
+                {
+                    'source_grid': name,
+                    'non_rectangular': grid_has_nonrectangular_coverage(name),
+                },
+            ])
 
     if cache_key is not None:
         _GRID_CACHE[cache_key] = grids
@@ -2457,13 +2518,32 @@ def get_itable_single(teff=None, logg=None, g=None, av=None, ebv=None, feh=None,
             arr = np.asarray(value)
             if arr.ndim > 0:
                 scalar_input = False
-            p_values.append(np.atleast_1d(arr.astype(float)))
+            p_values.append(np.atleast_1d(arr.astype(float)).reshape(-1))
+
+        # Vectorized likelihood calls combine sampled walker arrays with
+        # scalar fixed atmosphere parameters. Broadcast those fixed values to
+        # the common walker count before stacking interpolation coordinates.
+        # Non-scalar inputs must already agree in length so shape mistakes are
+        # reported explicitly instead of being silently tiled.
+        target_size = max(value.size for value in p_values)
+        incompatible = [value.size for value in p_values if value.size not in (1, target_size)]
+        if incompatible:
+            raise ValueError(
+                "Model parameters must be scalars or arrays with a common length; "
+                "received lengths {}.".format([value.size for value in p_values])
+            )
+        if target_size > 1:
+            p_values = [
+                np.full(target_size, float(value[0]), dtype=float)
+                if value.size == 1 else value
+                for value in p_values
+            ]
 
         p = np.vstack(p_values)
 
         values = interpol.interpolate(p, axis_values, pixelgrid)
 
-        if len(kwargs['grid']) > 3:
+        if len(kwargs['grid']) > 3 and isinstance(kwargs['grid'][3], dict):
             output_indices = kwargs['grid'][3].get('output_indices')
             if output_indices is not None:
                 values = values[np.asarray(output_indices, dtype=int)]

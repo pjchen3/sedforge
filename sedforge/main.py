@@ -82,16 +82,16 @@ def _initialization_method(setup):
     return str(setup.get('init_method', setup.get('initialization', 'auto'))).lower()
 
 
-def _reject_map_initialization_for_hdf5_grids(setup):
-    """L-BFGS-B MAP initialization is unsafe on piecewise HDF5 grids."""
+def _reject_map_initialization_for_piecewise_grids(setup):
+    """Reject gradient initialization on sparse/non-rectangular grids."""
     if _initialization_method(setup) not in _MAP_INITIALIZATION_METHODS:
         return
 
     gridnames = setup.get('grids', [])
-    if model.uses_hdf5_integrated_grid(gridnames):
+    if model.grid_has_nonrectangular_coverage(gridnames):
         raise ValueError(
-            "MAP initialization uses L-BFGS-B and is disabled for HDF5 integrated "
-            "grids because their likelihood can be piecewise and non-rectangular. "
+            "MAP initialization uses L-BFGS-B and is disabled for HDF5, sparse, "
+            "or non-rectangular integrated grids because their likelihood is piecewise. "
             "Use init_method: auto or init_method: grid for the grid-aware "
             "initializer."
         )
@@ -794,7 +794,7 @@ def validate_setup(setup):
     _reject_retired_setup_keys(setup)
     _reject_legacy_ebv_setup_parameter(setup)
     _reject_reddening_rv_for_rv_grids(setup)
-    _reject_map_initialization_for_hdf5_grids(setup)
+    _reject_map_initialization_for_piecewise_grids(setup)
 
     _normalise_fixed_parameters(setup)
     if 'error_model' in setup and setup['error_model'] is not None:
@@ -823,7 +823,7 @@ def _prepare_fit_parameters(setup):
     _reject_retired_setup_keys(setup)
     _reject_legacy_ebv_setup_parameter(setup)
     _reject_reddening_rv_for_rv_grids(setup)
-    _reject_map_initialization_for_hdf5_grids(setup)
+    _reject_map_initialization_for_piecewise_grids(setup)
 
     # -- pars limits
     raw_pnames = list(setup['pnames'])
@@ -926,7 +926,7 @@ def fit_sed(setup, photbands, obs, obs_err):
     nsteps = setup.get('nsteps', 4000)
     nrelax = setup.get('nrelax', 500)
     nworkers = setup.get('nworkers', setup.get('threads', 1))
-    a = setup.get('a', 10)
+    a = setup.get('a', 2)
     init_method = _initialization_method(setup)
     init_ntries = setup.get('init_ntries', 8)
     init_spread = setup.get('init_spread', 1e-3)
@@ -1058,6 +1058,8 @@ def write_results(setup, results, samples, obs, obs_err, photbands):
                      'mean_acceptance_fraction', 'min_acceptance_fraction',
                      'min_bulk_ess', 'min_tail_ess',
                      'initialization_seconds', 'grid_initialization_seconds',
+                     'initial_log_probability_min',
+                     'initial_log_probability_max',
                      'hdf5_cache_preload_seconds',
                      'hdf5_walker_cache_preloaded', 'vectorized_likelihood'):
             if name in diagnostics:
@@ -1469,6 +1471,8 @@ def _summary_from_results(row, index, setup, results):
                 'mean_acceptance_fraction', 'min_acceptance_fraction',
                 'min_bulk_ess', 'min_tail_ess',
                 'initialization_seconds', 'grid_initialization_seconds',
+                'initial_log_probability_min',
+                'initial_log_probability_max',
                 'hdf5_cache_preload_seconds',
                 'hdf5_cache_preloaded_before_grid_initialization',
                 'hdf5_cache_reused_at_fit_start', 'vectorized_likelihood'):

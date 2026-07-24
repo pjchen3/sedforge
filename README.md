@@ -78,10 +78,11 @@ archives are available from Zenodo:
 For the `ck_all` Quick Start below, download at least the integrated-grid
 archive. Download the spectral-cache archive too if you want SED plots with
 continuous model spectra. The current v2026.06.03 data release includes the
-legacy `ck03_cepheid_rv` HDF5 grid. sedforge 0.3.0 also supports the full
-`ck03_rv` and `newera_alpha0_rv` grids, but those two files are not yet part of
-that Zenodo record; generate them locally with the bundled scripts or obtain
-them from a future data release. Any HDF5 grid requires the `hdf5` extra.
+legacy `ck03_cepheid_rv` HDF5 grid. sedforge 0.3.0 and later also support the
+full `ck03_rv` and `newera_alpha0_rv` grids, but those two files are not yet
+part of that Zenodo record; generate them locally with the bundled scripts or
+obtain them from a future data release. Any HDF5 grid requires the `hdf5`
+extra.
 
 Unpack the archives in the same parent directory so that they merge into one
 `sed_models/` directory. The model grid directory is selected with
@@ -781,13 +782,21 @@ hdf5_auto_full_cache_max_gb: 2.0
 vectorized_likelihood: true
 ```
 
-For a single HDF5 component, `init_method: auto` selects a grid-aware walker
-initializer. It searches real atmosphere/extinction nodes, profiles the
+For a single prepared component with non-rectangular coverage,
+`init_method: auto` selects a grid-aware walker initializer. This applies to
+explicit-`Rv` HDF5 grids and fixed-`Rv` FITS grids such as NewEra. The
+initializer searches real atmosphere/extinction nodes, profiles the
 radius-distance normalization, and re-ranks candidates with the complete
-posterior. If the fast seed is implausibly poor, `init_grid_rescue: true`
-enables a derivative-free global rescue search. MAP initialization
-(`init_method: map`) remains available for smooth FITS grids but is rejected
-for piecewise, non-rectangular HDF5 grids.
+posterior. If the fast HDF5 seed is implausibly poor,
+`init_grid_rescue: true` enables a derivative-free global rescue search. MAP
+initialization (`init_method: map`) remains available for smooth, rectangular
+FITS grids but is rejected for piecewise model domains. Every initial walker
+must have a finite posterior before sampling begins.
+
+For non-rectangular FITS grids, unavailable interpolation corners do not
+contribute; the weights of the available multilinear corners are
+renormalized. A point with no valid local support returns a non-finite
+likelihood instead of borrowing a distant spectrum.
 
 The HDF5 cache contains only real spectra inside the active setup limits.
 Proposals outside a local cache automatically fall back to exact HDF5

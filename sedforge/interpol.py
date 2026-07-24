@@ -1,5 +1,5 @@
 import numpy as np
-from scipy import ndimage
+from itertools import product
 
 def create_pixeltypegrid(grid_pars,grid_data):
    """
@@ -123,12 +123,18 @@ def interpolate(p, axis_values, pixelgrid):
    for i, ax in enumerate(axis_values):
       p[i] = np.array(p[i], dtype = ax.dtype)
    
-   #-- Convert requested parameter combination into a coordinate. Axes with a
-   #   single value can appear when a grid is prepared for an exact point.
-   p_coord = []
+   #-- Build lower/upper node indices and multilinear weights.  Missing nodes
+   #   are represented by non-finite values in pixelgrid.  Their weights are
+   #   omitted and the remaining corner weights are renormalized, matching the
+   #   sparse HDF5-grid interpolation used elsewhere in SedForge.
+   bounds = []
+   inside = np.ones(np.shape(p)[1], dtype=bool)
    for av_, val in zip(axis_values, p):
       if len(av_) == 1:
-         p_coord.append(np.zeros_like(val, dtype=float))
+         tolerance = max(1e-10, 1e-8 * max(1.0, abs(float(av_[0]))))
+         inside &= np.abs(val - av_[0]) <= tolerance
+         bounds.append(((np.zeros_like(val, dtype=int),
+                         np.ones_like(val, dtype=float)),))
          continue
 
       indices = np.searchsorted(av_, val)
@@ -136,9 +142,38 @@ def interpolate(p, axis_values, pixelgrid):
       indices[indices == len(av_)] = len(av_) - 1
       lower = av_[indices - 1]
       step = av_[indices] - lower
-      p_coord.append((val - lower) / step + indices - 1)
-   p_coord = np.array(p_coord)
+      fraction = (val - lower) / step
+      tolerance = max(
+         1e-10,
+         1e-8 * max(1.0, abs(float(av_[0])), abs(float(av_[-1]))),
+      )
+      inside &= (val >= av_[0] - tolerance) & (val <= av_[-1] + tolerance)
+      bounds.append((
+         (indices - 1, 1.0 - fraction),
+         (indices, fraction),
+      ))
 
-   # interpolate
-   return np.array([ndimage.map_coordinates(pixelgrid[...,i],p_coord, order=1, prefilter=False) \
-               for i in range(np.shape(pixelgrid)[-1])])
+   npoint = np.shape(p)[1]
+   ndata = np.shape(pixelgrid)[-1]
+   values = np.zeros((npoint, ndata), dtype=float)
+   total_weight = np.zeros((npoint, ndata), dtype=float)
+
+   for corner in product(*bounds):
+      indices = tuple(item[0] for item in corner)
+      weight = np.prod([item[1] for item in corner], axis=0)
+      positive = inside & (weight > 0)
+      if not np.any(positive):
+         continue
+
+      corner_values = np.asarray(pixelgrid[indices], dtype=float)
+      finite = np.isfinite(corner_values) & positive[:, None]
+      weighted = weight[:, None]
+      contribution = np.zeros_like(corner_values, dtype=float)
+      np.multiply(corner_values, weighted, out=contribution, where=finite)
+      values += contribution
+      total_weight += np.where(finite, weighted, 0.0)
+
+   result = np.full((npoint, ndata), np.nan, dtype=float)
+   valid = total_weight > 0
+   result[valid] = values[valid] / total_weight[valid]
+   return result.T

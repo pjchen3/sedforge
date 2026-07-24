@@ -64,9 +64,10 @@ python -m pip install ".[hdf5]"        # HDF5 模型网格支持
 如果只运行下面 `ck_all` 的 Quick Start，至少需要下载 integrated-grid archive。
 如果希望生成带连续模型光谱的 SED 图，还需要下载 spectral-cache archive。
 当前 v2026.06.03 data release 包含旧版 `ck03_cepheid_rv` HDF5 网格。
-sedforge 0.3.0 也支持完整的 `ck03_rv` 和 `newera_alpha0_rv`，但这两个文件尚未
-包含在该 Zenodo 记录中；用户需要使用包内脚本自行生成，或等待后续 data release。
-使用任何 HDF5 网格都需要安装 `hdf5` extra。
+sedforge 0.3.0 及之后版本也支持完整的 `ck03_rv` 和
+`newera_alpha0_rv`，但这两个文件尚未包含在该 Zenodo 记录中；用户需要使用
+包内脚本自行生成，或等待后续 data release。使用任何 HDF5 网格都需要安装
+`hdf5` extra。
 
 把需要的 archive 解压到同一个上级目录中，让它们合并成同一个 `sed_models/`
 目录。模型网格目录通过环境变量 `SEDFORGE_MODELS` 指定：
@@ -503,11 +504,18 @@ hdf5_auto_full_cache_max_gb: 2.0
 vectorized_likelihood: true
 ```
 
-对于单组分 HDF5 网格，`init_method: auto` 会选择 grid-aware walker 初始化：
-搜索真实存在的 atmosphere/extinction 节点，解析求解 radius-distance 归一化，
-再用完整 posterior 对候选点排序。如果快速种子明显不合理，默认启用的
-`init_grid_rescue: true` 会执行无梯度全局救援搜索。平滑 FITS 网格仍可使用
-`init_method: map`，但该方法不适用于分段、非矩形 HDF5 网格，因此会被拒绝。
+对于单组分、非矩形覆盖的已准备网格，`init_method: auto` 会选择 grid-aware
+walker 初始化；这既适用于显式 `Rv` 的 HDF5 网格，也适用于 NewEra 这类固定
+`Rv` 的非矩形 FITS 网格。初始化器会搜索真实存在的 atmosphere/extinction
+节点，解析求解 radius-distance 归一化，再用完整 posterior 对候选点排序。
+如果快速 HDF5 种子明显不合理，默认启用的 `init_grid_rescue: true` 会执行
+无梯度全局救援搜索。平滑、矩形的 FITS 网格仍可使用 `init_method: map`，
+但该方法不适用于分段模型参数域，因此会被拒绝。采样开始前，每个 walker
+的初始位置都必须具有有限 posterior。
+
+对于非矩形 FITS 网格，缺失的插值角点不参与计算，其余有效角点的多线性权重
+会重新归一化。如果某个位置周围没有任何有效模型支持，则返回非有限
+likelihood，而不会借用较远的光谱。
 
 HDF5 缓存只保存 setup 参数范围内真实存在的光谱。走出局部缓存的 proposal 会
 自动回退到精确 HDF5 插值，所以缓存不会限制参数空间或改变 posterior。只有非

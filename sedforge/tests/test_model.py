@@ -1,13 +1,95 @@
-import pytest
+import os
+from importlib import reload
 
 import numpy as np
+import pytest
+from astropy.io import fits
 
 from sedforge import integrate_grid, mcmc, model, spectral_cache, statfunc
 
-from importlib import reload
 
-import os
-from astropy.io import fits
+def test_axis_bounds_accepts_decimal_endpoint_stored_as_float32():
+    # The reader exposes float64 values even when the file stored float32.
+    axis = np.array([0.0, 6.2], dtype=np.float32).astype(float)
+    assert model._axis_bounds(axis, 6.2) == [(1, 1.0)]
+    with pytest.raises(ValueError, match="outside grid axis"):
+        model._axis_bounds(axis, 6.2001)
+
+
+def test_get_itable_single_accepts_fixed_fits_grid_name(monkeypatch):
+    axis_values = [
+        np.array([5000.0]),
+        np.array([4.0]),
+        np.array([0.0]),
+    ]
+    pixelgrid = np.empty((1, 1, 1, 2), dtype=float)
+    grid_names = np.array(['teff', 'logg', 'av'])
+    monkeypatch.setattr(model, '_grid_integrated_format', lambda grid: 'fits')
+    monkeypatch.setattr(
+        model,
+        'prepare_grid',
+        lambda *args, **kwargs: (
+            axis_values,
+            np.array([[5000.0, 4.0, 0.0]]),
+            pixelgrid,
+            grid_names,
+        ),
+    )
+    monkeypatch.setattr(
+        model.interpol,
+        'interpolate',
+        lambda parameters, axes, pixels: np.log10(np.array([[2.0], [3.0]])),
+    )
+
+    flux, luminosity = model.get_itable_single(
+        teff=5000.0,
+        logg=4.0,
+        av=0.0,
+        grid='newera_alpha0',
+        photbands=['GAIA3E_G'],
+    )
+
+    assert np.allclose(flux, [2.0])
+    assert np.isclose(luminosity, 3.0)
+
+
+def test_get_itable_single_broadcasts_fixed_parameters_for_vectorized_walkers(monkeypatch):
+    axis_values = [
+        np.array([5000.0, 5250.0]),
+        np.array([4.5, 5.0]),
+        np.array([0.0, 1.0]),
+        np.array([-1.5, -1.0]),
+    ]
+    pixelgrid = np.empty((2, 2, 2, 2, 2), dtype=float)
+    grid_names = np.array(['teff', 'logg', 'av', 'feh'])
+    captured = {}
+
+    def fake_interpolate(parameters, axes, pixels):
+        captured['parameters'] = parameters.copy()
+        npoints = parameters.shape[1]
+        return np.log10(np.vstack([np.full(npoints, 2.0), np.full(npoints, 3.0)]))
+
+    monkeypatch.setattr(model.interpol, 'interpolate', fake_interpolate)
+    av = np.array([0.1, 0.2, 0.3])
+    radius = np.array([1.0, 1.1, 1.2])
+    distance = np.array([100.0, 110.0, 120.0])
+    flux, luminosity = model.get_itable_single(
+        teff=5205.0,
+        logg=4.7172,
+        feh=-1.313,
+        av=av,
+        rad=radius,
+        distance=distance,
+        grid=[axis_values, pixelgrid, grid_names],
+    )
+
+    assert captured['parameters'].shape == (4, 3)
+    assert np.allclose(captured['parameters'][0], 5205.0)
+    assert np.allclose(captured['parameters'][1], 4.7172)
+    assert np.allclose(captured['parameters'][2], av)
+    assert np.allclose(captured['parameters'][3], -1.313)
+    assert flux.shape == (1, 3)
+    assert luminosity.shape == (3,)
 
 grid_description_ex = """
 ckp00:
@@ -80,6 +162,24 @@ def test_prepared_fits_grid_hdf5_check_does_not_walk_pixel_values():
 
     prepared = [[np.array([1.0])], PixelGrid(), np.array(['teff'])]
     assert not model.uses_hdf5_integrated_grid(prepared)
+
+
+def test_newera_and_sparse_prepared_fits_are_nonrectangular():
+    assert model.grid_has_nonrectangular_coverage('newera_alpha0')
+
+    sparse = [
+        [np.array([1.0, 2.0])],
+        np.array([[0.0, 0.0], [np.inf, np.inf]]),
+        np.array(['teff']),
+    ]
+    complete = [
+        [np.array([1.0, 2.0])],
+        np.array([[0.0, 0.0], [1.0, 1.0]]),
+        np.array(['teff']),
+    ]
+
+    assert model.grid_has_nonrectangular_coverage(sparse)
+    assert not model.grid_has_nonrectangular_coverage(complete)
 
 
 def test_component_grid_count_mismatch_raises():

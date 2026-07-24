@@ -2,6 +2,20 @@
 
 All notable user-facing changes to sedforge are documented here.
 
+## 0.3.1 - 2026-07-24
+
+- Fixed interpolation near missing combinations in non-rectangular NewEra FITS
+  grids by renormalizing the available multilinear corner weights.
+- Added grid-aware walker initialization for sparse FITS grids, including
+  fixed-`Rv` NewEra models, and rejected finite-difference MAP initialization on
+  piecewise model domains.
+- Validate that every initial MCMC walker has a finite posterior before
+  sampling begins.
+- Broadcast fixed scalar atmosphere parameters across vectorized walker
+  evaluations.
+- Restored the standard emcee stretch-move scale (`a = 2`) as the generated
+  setup and API default.
+
 ## 0.3.0 - 2026-07-11
 
 - Added grid-aware initialization and bounded sparse caching for explicit-`Rv`

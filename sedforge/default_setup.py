@@ -59,8 +59,8 @@ jitter: false
 nwalkers: 24     # total number of walkers
 nsteps: 4000     # steps taken by each walker (not including burn-in)
 nrelax: 500      # burn-in steps taken by each walker
-a: 10            # relative size of the steps taken
-init_method: auto # grid-aware for HDF5 grids; random for legacy FITS grids
+a: 2             # emcee stretch-move scale
+init_method: auto # grid-aware for one non-rectangular grid; random otherwise
 init_grid_rescue: true # globally re-search only when the fast grid seed has implausibly high chi2
 init_grid_rescue_cache_max_gb: 2.0 # full YAML-limit cache allowed for rescue initialization
 hdf5_preload: false # full active-subgrid cache; useful only for a single long fit
@@ -165,8 +165,8 @@ jitter: false
 nwalkers: 24     # total number of walkers
 nsteps: 4000     # steps taken by each walker (not including burn-in)
 nrelax: 500      # burn-in steps taken by each walker
-a: 10            # relative size of the steps taken
-init_method: auto # grid-aware for single-component HDF5 grids
+a: 2             # emcee stretch-move scale
+init_method: auto # grid-aware for one non-rectangular grid; random otherwise
 init_grid_rescue: true # globally re-search only when the fast grid seed has implausibly high chi2
 init_grid_rescue_cache_max_gb: 2.0 # full YAML-limit cache allowed for rescue initialization
 hdf5_preload: false # full active-subgrid cache; useful only for a single long fit

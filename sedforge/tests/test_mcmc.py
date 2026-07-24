@@ -7,6 +7,18 @@ from sedforge import mcmc, statfunc
 
 class TestMCMC:
 
+    def test_grid_list_keeps_prepared_fits_grid_as_one_component(self):
+        grid = [
+            [np.array([3000.0, 4000.0])],
+            np.array([[0.0, 0.0], [1.0, 1.0]]),
+            np.array(['teff']),
+        ]
+
+        direct = mcmc._grid_list(grid)
+        wrapped = mcmc._grid_list([grid])
+        assert len(direct) == 1 and direct[0] is grid
+        assert len(wrapped) == 1 and wrapped[0] is grid
+
     def test_vectorized_log_probability_reuses_derived_values_when_all_valid(self):
         calls = []
 
@@ -185,6 +197,58 @@ class TestMCMC:
         assert positions.shape == (6, 3)
         assert np.allclose(positions[:, 0], 8.0, atol=1.0e-3)
 
+    def test_grid_initializer_profiles_sparse_prepared_fits_grid(self):
+        axes = [
+            np.array([4000.0, 6000.0]),
+            np.array([0.0, 1.0]),
+        ]
+        flux = np.array([
+            [[1.0, 1.0, 1.0], [0.5, 0.8, 1.0]],
+            [[1.0, 4.0, 2.0], [0.5, 3.2, 2.0]],
+        ])
+        grid = [
+            axes,
+            np.log10(flux),
+            np.array(['teff', 'av']),
+            {'non_rectangular': True},
+        ]
+        scale = (2.0 / (10.0 * mcmc.model.PC_TO_RSOL)) ** 2
+        obs = np.array([1.0, 4.0]) * scale
+        obs_err = obs * 0.01
+        pnames = ['teff', 'rad', 'distance', 'av']
+        limits = np.array([
+            [4000.0, 6000.0],
+            [1.0, 3.0],
+            [5.0, 20.0],
+            [0.0, 1.0],
+        ])
+        kwargs = {
+            'pnames': pnames,
+            'grid': [grid],
+            'fixed_variables': {},
+            'priors': {'distance': (10.0, 0.5, 0.5)},
+            'photbands': ['B1', 'B2'],
+            'error_model': {'type': 'none'},
+            'prop_func': statfunc.get_derived_properties,
+        }
+
+        positions = mcmc._grid_positions(
+            obs,
+            obs_err,
+            limits,
+            kwargs,
+            nwalkers=8,
+            maximum_modes=1,
+            spread=1.0e-8,
+        )
+
+        assert positions.shape == (8, 4)
+        assert np.allclose(positions[:, 0], 6000.0, atol=1.0e-2)
+        assert np.allclose(positions[:, 3], 0.0, atol=1.0e-6)
+        assert all(np.isfinite(
+            mcmc.lnprob(row, obs, obs_err, limits, **kwargs)[0]
+        ) for row in positions)
+
     def test_representative_cache_positions_keep_separated_high_posterior_modes(self):
         positions = np.array([
             [0.10, 0.10],
@@ -265,7 +329,7 @@ class TestMCMC:
     def test_map_initialization_rejects_prepared_hdf5_grid(self, monkeypatch):
         monkeypatch.setattr(
             mcmc.model,
-            'uses_hdf5_integrated_grid',
+            'grid_has_nonrectangular_coverage',
             lambda grids: True,
         )
 
@@ -277,6 +341,24 @@ class TestMCMC:
                 ['teff'],
                 np.array([[3000.0, 8000.0]]),
                 ['prepared-hdf5-grid'],
+                init_method='map',
+            )
+
+    def test_map_initialization_rejects_sparse_prepared_fits_grid(self):
+        grid = [
+            [np.array([3000.0, 4000.0])],
+            np.array([[0.0, 0.0], [np.inf, np.inf]]),
+            np.array(['teff']),
+        ]
+
+        with pytest.raises(ValueError, match='non-rectangular'):
+            mcmc.MCMC(
+                np.array([1.0]),
+                np.array([0.1]),
+                ['GAIA3E_G'],
+                ['teff'],
+                np.array([[3000.0, 4000.0]]),
+                [grid],
                 init_method='map',
             )
 

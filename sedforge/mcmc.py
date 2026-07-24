@@ -1,5 +1,6 @@
 import warnings
 import time
+from itertools import product
 
 import numpy as np
 from multiprocessing import get_context
@@ -439,6 +440,272 @@ def _distinct_grid_seeds(scored, limits, maximum_modes, min_separation,
     return seeds or [scored[0][1]]
 
 
+def _sample_seed_axis_indices(values, count, logarithmic=False):
+    indices = np.arange(len(values), dtype=int)
+    if len(indices) <= int(count):
+        return indices
+    selected_values = np.asarray(values, dtype=float)
+    coordinates = (
+        np.log1p(selected_values)
+        if logarithmic and np.all(selected_values >= 0)
+        else selected_values
+    )
+    targets = np.linspace(coordinates[0], coordinates[-1], int(count))
+    positions = np.searchsorted(coordinates, targets)
+    positions = np.clip(positions, 0, len(indices) - 1)
+    previous = np.maximum(positions - 1, 0)
+    use_previous = np.abs(coordinates[previous] - targets) < np.abs(
+        coordinates[positions] - targets
+    )
+    positions[use_previous] = previous[use_previous]
+    return np.unique(indices[positions])
+
+
+def _profile_scale_and_chi2(flux, obs, weights):
+    flux = np.asarray(flux, dtype=float)
+    valid = np.all(np.isfinite(flux) & (flux > 0), axis=1)
+    scale = np.full(len(flux), np.nan, dtype=float)
+    chi2 = np.full(len(flux), np.inf, dtype=float)
+    if not np.any(valid):
+        return scale, chi2
+
+    values = flux[valid]
+    numerator = np.sum(values * (obs * weights), axis=1)
+    denominator = np.sum(values ** 2 * weights, axis=1)
+    usable = np.isfinite(numerator) & np.isfinite(denominator) & (denominator > 0)
+    profile_scale = np.full(len(values), np.nan, dtype=float)
+    profile_scale[usable] = numerator[usable] / denominator[usable]
+    usable &= profile_scale > 0
+    residual = values[usable] * profile_scale[usable, None] - obs
+    profile_chi2 = np.sum(residual ** 2 * weights, axis=1)
+
+    valid_indices = np.flatnonzero(valid)
+    usable_indices = valid_indices[usable]
+    scale[usable_indices] = profile_scale[usable]
+    chi2[usable_indices] = profile_chi2
+    return scale, chi2
+
+
+def _prepared_fits_seed_layout(grid, nobs):
+    axis_values = [np.asarray(axis) for axis in grid[0]]
+    pixelgrid = grid[1]
+    names = [str(name).lower() for name in np.asarray(grid[2])]
+    metadata = grid[3] if len(grid) > 3 and isinstance(grid[3], dict) else {}
+    output_indices = metadata.get('output_indices')
+    if output_indices is None:
+        output_indices = np.arange(int(nobs), dtype=int)
+    else:
+        output_indices = np.asarray(output_indices, dtype=int)[:int(nobs)]
+    if len(output_indices) != int(nobs) or np.any(output_indices >= pixelgrid.shape[-1]):
+        raise ValueError(
+            "Prepared FITS grid does not contain every fitted photometric band."
+        )
+
+    scan_positions = [
+        index for index, name in enumerate(names)
+        if name in {'av', 'ebv', 'rv'}
+    ]
+    base_positions = [
+        index for index in range(len(names))
+        if index not in scan_positions
+    ]
+    if not base_positions:
+        raise ValueError(
+            "Grid-aware FITS initialization requires at least one atmosphere axis."
+        )
+    return (
+        axis_values,
+        pixelgrid,
+        names,
+        output_indices,
+        base_positions,
+        scan_positions,
+    )
+
+
+def _prepared_fits_valid_base_nodes(layout):
+    axis_values, pixelgrid, _names, output_indices, base_positions, scan_positions = layout
+    reference = []
+    for position in range(len(axis_values)):
+        reference.append(slice(None) if position in base_positions else 0)
+    finite = np.isfinite(
+        np.asarray(pixelgrid[tuple(reference) + (int(output_indices[0]),)])
+    )
+    return np.flatnonzero(finite.reshape(-1))
+
+
+def _prepared_fits_node_rows(layout, base_indices, scan_indices):
+    axis_values, pixelgrid, _names, output_indices, base_positions, scan_positions = layout
+    base_shape = tuple(len(axis_values[position]) for position in base_positions)
+    base_coordinates = np.unravel_index(
+        np.asarray(base_indices, dtype=int),
+        base_shape,
+    )
+    base_lookup = {
+        position: np.asarray(coordinates, dtype=int)
+        for position, coordinates in zip(base_positions, base_coordinates)
+    }
+    scan_lookup = {
+        position: int(index)
+        for position, index in zip(scan_positions, scan_indices)
+    }
+    count = len(np.asarray(base_indices))
+    indices = []
+    for position in range(len(axis_values)):
+        if position in base_lookup:
+            indices.append(base_lookup[position])
+        else:
+            indices.append(np.full(count, scan_lookup[position], dtype=int))
+    log_rows = np.asarray(pixelgrid[tuple(indices)], dtype=float)
+    if log_rows.ndim == 1:
+        log_rows = log_rows[None, :]
+    return 10.0 ** log_rows[:, output_indices]
+
+
+def _prepared_fits_candidate(layout, base_index, scan_indices, scale, chi2):
+    axis_values, _pixelgrid, names, _outputs, base_positions, scan_positions = layout
+    base_shape = tuple(len(axis_values[position]) for position in base_positions)
+    base_coordinates = np.unravel_index(int(base_index), base_shape)
+    index_lookup = {
+        position: int(index)
+        for position, index in zip(base_positions, base_coordinates)
+    }
+    index_lookup.update({
+        position: int(index)
+        for position, index in zip(scan_positions, scan_indices)
+    })
+    candidate = {
+        'spec_index': int(base_index),
+        'scale': float(scale),
+        'profile_chi2': float(chi2),
+    }
+    for position, name in enumerate(names):
+        candidate[name] = float(axis_values[position][index_lookup[position]])
+    return candidate
+
+
+def _append_prepared_fits_candidates(candidates, layout, base_indices,
+                                     scan_combinations, obs, weights,
+                                     keep_count, unique_spectra=False,
+                                     chunk_size=2048):
+    base_indices = np.unique(np.asarray(base_indices, dtype=int))
+    for scan_indices in scan_combinations:
+        for start in range(0, len(base_indices), int(chunk_size)):
+            chunk = base_indices[start:start + int(chunk_size)]
+            rows = _prepared_fits_node_rows(layout, chunk, scan_indices)
+            scales, chi2 = _profile_scale_and_chi2(rows, obs, weights)
+            count = min(int(keep_count), len(chunk))
+            if count == 0:
+                continue
+            selected = np.argpartition(chi2, count - 1)[:count]
+            for local_index in selected:
+                if not np.isfinite(chi2[local_index]):
+                    continue
+                candidates.append(_prepared_fits_candidate(
+                    layout,
+                    chunk[local_index],
+                    scan_indices,
+                    scales[local_index],
+                    chi2[local_index],
+                ))
+
+        candidates.sort(key=lambda item: item['profile_chi2'])
+        if unique_spectra:
+            retained = []
+            seen = set()
+            for candidate in candidates:
+                key = int(candidate['spec_index'])
+                if key in seen:
+                    continue
+                seen.add(key)
+                retained.append(candidate)
+                if len(retained) >= int(keep_count):
+                    break
+            candidates[:] = retained
+        else:
+            del candidates[int(keep_count):]
+    return candidates
+
+
+def _prepared_fits_profile_seed_candidates(
+        grid, obs, obs_err, maximum_spectra=12000,
+        coarse_rv_points=7, coarse_av_points=11,
+        coarse_keep_count=256, refine_spectra=64, result_count=256):
+    """Profile normalization on sparse FITS nodes without using gradients."""
+    obs = np.asarray(obs, dtype=float)
+    obs_err = np.asarray(obs_err, dtype=float)
+    valid = np.isfinite(obs) & np.isfinite(obs_err) & (obs > 0) & (obs_err > 0)
+    if not np.all(valid):
+        raise ValueError(
+            "Grid seed search requires finite positive observations and errors."
+        )
+    weights = 1.0 / obs_err ** 2
+    layout = _prepared_fits_seed_layout(grid, len(obs))
+    axis_values, _pixels, names, _outputs, _base_positions, scan_positions = layout
+
+    base_indices = _prepared_fits_valid_base_nodes(layout)
+    if len(base_indices) > int(maximum_spectra):
+        selected = np.linspace(
+            0, len(base_indices) - 1, int(maximum_spectra), dtype=int,
+        )
+        base_indices = np.unique(base_indices[selected])
+    if len(base_indices) == 0:
+        return []
+
+    coarse_axes = []
+    full_axes = []
+    for position in scan_positions:
+        name = names[position]
+        values = axis_values[position]
+        full_axes.append(np.arange(len(values), dtype=int))
+        coarse_axes.append(_sample_seed_axis_indices(
+            values,
+            coarse_rv_points if name == 'rv' else coarse_av_points,
+            logarithmic=name in {'av', 'ebv'},
+        ))
+    coarse_combinations = list(product(*coarse_axes)) if coarse_axes else [()]
+    candidates = _append_prepared_fits_candidates(
+        [],
+        layout,
+        base_indices,
+        coarse_combinations,
+        obs,
+        weights,
+        keep_count=coarse_keep_count,
+        unique_spectra=True,
+    )
+    if not candidates:
+        return []
+
+    refined = np.asarray(
+        list(dict.fromkeys(
+            int(candidate['spec_index']) for candidate in candidates
+        ))[:int(refine_spectra)],
+        dtype=int,
+    )
+    full_combinations = product(*full_axes) if full_axes else [()]
+    candidates = _append_prepared_fits_candidates(
+        candidates,
+        layout,
+        refined,
+        full_combinations,
+        obs,
+        weights,
+        keep_count=result_count,
+    )
+    candidates.sort(key=lambda item: item['profile_chi2'])
+    return candidates[:int(result_count)]
+
+
+def _grid_list(grids):
+    """Return component grids without splitting a prepared FITS tuple."""
+    if model._is_prepared_grid(grids):
+        return [grids]
+    if isinstance(grids, str):
+        return [grids]
+    return list(grids) if hasattr(grids, '__iter__') else [grids]
+
+
 def _grid_positions(obs, obs_err, limits, kwargs, nwalkers,
                     maximum_spectra=12000, coarse_rv_points=7,
                     coarse_av_points=11, top_candidates=256,
@@ -448,18 +715,32 @@ def _grid_positions(obs, obs_err, limits, kwargs, nwalkers,
                     rescue_cache_max_gb=2.0, rescue_maxiter=80,
                     rescue_popsize=12,
                     return_seeds=False):
-    """Initialize a single-component HDF5 fit from discrete high-likelihood nodes."""
-    grids = list(kwargs['grid']) if hasattr(kwargs['grid'], '__iter__') else [kwargs['grid']]
-    hdf5_grids = [grid for grid in grids if isinstance(grid, model.HDF5IntegratedGrid)]
-    if len(grids) != 1 or len(hdf5_grids) != 1:
+    """Initialize one prepared grid from discrete high-likelihood nodes."""
+    grids = _grid_list(kwargs['grid'])
+    if len(grids) != 1 or not model._is_prepared_grid(grids[0]):
         raise ValueError(
-            "Grid initialization currently supports one HDF5 stellar component. "
+            "Grid initialization currently supports one prepared stellar component. "
             "Use an explicit scientifically justified initialization for multi-component fits."
         )
 
-    grid = hdf5_grids[0]
-    try:
-        candidates = grid.profile_seed_candidates(
+    grid = grids[0]
+    hdf5_grid = isinstance(grid, model.HDF5IntegratedGrid)
+    if hdf5_grid:
+        try:
+            candidates = grid.profile_seed_candidates(
+                obs,
+                obs_err,
+                maximum_spectra=maximum_spectra,
+                coarse_rv_points=coarse_rv_points,
+                coarse_av_points=coarse_av_points,
+                result_count=top_candidates,
+            )
+        finally:
+            # Do not carry a parent HDF5 handle into forked likelihood workers.
+            grid.close()
+    else:
+        candidates = _prepared_fits_profile_seed_candidates(
+            grid,
             obs,
             obs_err,
             maximum_spectra=maximum_spectra,
@@ -467,11 +748,8 @@ def _grid_positions(obs, obs_err, limits, kwargs, nwalkers,
             coarse_av_points=coarse_av_points,
             result_count=top_candidates,
         )
-    finally:
-        # Do not carry a parent HDF5 handle into forked likelihood workers.
-        grid.close()
     if not candidates:
-        raise ValueError("HDF5 grid search found no finite photometric seed candidates.")
+        raise ValueError("Grid search found no finite photometric seed candidates.")
 
     normalised_priors = _normalise_priors(kwargs.get('priors', {}))
 
@@ -500,14 +778,14 @@ def _grid_positions(obs, obs_err, limits, kwargs, nwalkers,
     scored = score_candidates(candidates)
     if not scored:
         raise ValueError(
-            "HDF5 grid search found candidates, but none satisfy the physical "
+            "Grid search found candidates, but none satisfy the physical "
             "radius/distance limits and priors."
         )
 
     threshold = rescue_chi2_threshold
     if threshold is None:
         threshold = len(obs) + 6.0 * np.sqrt(2.0 * len(obs))
-    if bool(rescue) and scored[0][2] > float(threshold):
+    if bool(rescue) and hdf5_grid and scored[0][2] > float(threshold):
         initial_chi2 = scored[0][2]
         rescue_candidates = []
         if grid.preload_full_active_subgrid(max_gb=rescue_cache_max_gb):
@@ -557,16 +835,50 @@ def _grid_positions(obs, obs_err, limits, kwargs, nwalkers,
     limits = np.asarray(limits, dtype=float)
     width = limits[:, 1] - limits[:, 0]
     rng = np.random.default_rng()
+    pnames = [str(name) for name in kwargs['pnames']]
+    parameter_index = {name: index for index, name in enumerate(pnames)}
+    distance_name = 'distance' if 'distance' in parameter_index else 'dist'
+
+    def local_seed_sigma(seed):
+        local_scale = np.maximum(np.abs(seed), 0.01 * width)
+        sigma = np.minimum(width * float(spread), local_scale * float(spread))
+        for name, (_center, err_minus, err_plus) in normalised_priors.items():
+            if name in parameter_index:
+                sigma[parameter_index[name]] = min(
+                    sigma[parameter_index[name]],
+                    0.25 * 0.5 * (err_minus + err_plus),
+                )
+        return np.maximum(sigma, 1e-10)
+
+    def preserve_flux_scale(seed, trial, shrink):
+        if 'rad' not in parameter_index or distance_name not in parameter_index:
+            return trial
+        radius_index = parameter_index['rad']
+        distance_index = parameter_index[distance_name]
+        ratio = seed[radius_index] / seed[distance_index]
+        if 'rad' in normalised_priors and distance_name not in normalised_priors:
+            trial[distance_index] = trial[radius_index] / ratio
+        else:
+            trial[radius_index] = trial[distance_index] * ratio
+        # A tiny orthogonal displacement avoids placing the ensemble in an
+        # exactly lower-dimensional affine subspace.
+        trial[radius_index] *= 1.0 + rng.normal(
+            0.0, max(1e-8, min(1e-4, float(spread) * 0.01)) * shrink,
+        )
+        return trial
+
     positions = []
     for index in range(int(nwalkers)):
         seed = seeds[index % len(seeds)]
         accepted = None
+        sigma = local_seed_sigma(seed)
         for attempt in range(48):
             shrink = 0.25 ** (attempt // 12)
             trial = seed + rng.normal(
                 0.0,
-                np.maximum(width * float(spread) * shrink, 1e-10),
+                sigma * shrink,
             )
+            trial = preserve_flux_scale(seed, trial, shrink)
             trial = np.clip(trial, limits[:, 0], limits[:, 1])
             logprob, _derived = lnprob(trial, obs, obs_err, limits, **kwargs)
             if np.isfinite(logprob) and logprob >= best_logprob - float(max_delta_logprob):
@@ -574,12 +886,13 @@ def _grid_positions(obs, obs_err, limits, kwargs, nwalkers,
                 break
         if accepted is None:
             raise ValueError(
-                "Could not draw a valid HDF5 walker near a high-posterior grid seed."
+                "Could not draw a valid walker near a high-posterior grid seed."
             )
         positions.append(accepted)
 
     print(
-        "Initialized {} walkers from {} HDF5 grid seed basin(s); best seed log-probability {:.3f}.".format(
+        "Initialized {} walkers from {} integrated-grid seed basin(s); "
+        "best seed log-probability {:.3f}.".format(
             nwalkers,
             len(seeds),
             best_logprob,
@@ -894,7 +1207,7 @@ def _preload_hdf5_walker_neighborhood(grids, pnames, fixed_variables, positions,
                                       mode_envelope_max_gb=2.0,
                                       full_active_max_gb=2.0):
     """Try to cache the local HDF5 region occupied by initialized walkers."""
-    grid_list = list(grids) if hasattr(grids, '__iter__') else [grids]
+    grid_list = _grid_list(grids)
     hdf5_grids = [
         grid for grid in grid_list if isinstance(grid, model.HDF5IntegratedGrid)
     ]
@@ -931,7 +1244,7 @@ def _preload_hdf5_walker_neighborhood(grids, pnames, fixed_variables, positions,
 
 def _preload_hdf5_full_active(grids, max_gb):
     """Preload one single-component HDF5 grid before seed generation."""
-    grid_list = list(grids) if hasattr(grids, '__iter__') else [grids]
+    grid_list = _grid_list(grids)
     if len(grid_list) != 1 or not isinstance(grid_list[0], model.HDF5IntegratedGrid):
         return False
     try:
@@ -968,7 +1281,7 @@ def _representative_cache_positions(positions, log_prob, limits, maximum=4,
 
 def _hdf5_cache_diagnostics(grids, nworkers):
     """Expose parent-process cache metadata without changing the likelihood."""
-    grid_list = list(grids) if hasattr(grids, '__iter__') else [grids]
+    grid_list = _grid_list(grids)
     hdf5_grids = [
         grid for grid in grid_list if isinstance(grid, model.HDF5IntegratedGrid)
     ]
@@ -981,7 +1294,7 @@ def _hdf5_cache_diagnostics(grids, nworkers):
 
 def _reset_hdf5_cache_statistics(grids):
     """Start per-source cache accounting without dropping reusable arrays."""
-    grid_list = list(grids) if hasattr(grids, '__iter__') else [grids]
+    grid_list = _grid_list(grids)
     reused = False
     for grid in grid_list:
         if not isinstance(grid, model.HDF5IntegratedGrid):
@@ -1041,7 +1354,7 @@ def MCMC(obs, obs_err, photbands,
          pnames, limits, grids,
          fixed_variables=None, priors=None,
          error_model=None,
-         nwalkers=24, nsteps=4000, nrelax=500, a=10, pos=None,
+         nwalkers=24, nsteps=4000, nrelax=500, a=2, pos=None,
          nworkers=1, init_method='auto', init_ntries=8,
          init_spread=1e-3, autostop=False,
          autostop_check_interval=200, autostop_tau_factor=50.0,
@@ -1069,15 +1382,25 @@ def MCMC(obs, obs_err, photbands,
     priors = {} if priors is None else priors
     nworkers = int(nworkers or 1)
 
+    grid_list = _grid_list(grids)
+    prepared_single_grid = (
+        len(grid_list) == 1 and model._is_prepared_grid(grid_list[0])
+    )
+    nonrectangular_grid = model.grid_has_nonrectangular_coverage(grids)
     init_method = str(init_method).lower()
     if init_method == 'auto':
-        init_method = 'grid' if model.uses_hdf5_integrated_grid(grids) else 'random'
+        init_method = (
+            'grid'
+            if prepared_single_grid and nonrectangular_grid
+            else 'random'
+        )
 
     if init_method in _MAP_INITIALIZATION_METHODS and \
-            model.uses_hdf5_integrated_grid(grids):
+            nonrectangular_grid:
         raise ValueError(
-            "MAP initialization uses L-BFGS-B and is disabled for HDF5 integrated "
-            "grids because their likelihood can be piecewise and non-rectangular."
+            "MAP initialization uses L-BFGS-B and is disabled for HDF5, sparse, "
+            "or non-rectangular integrated grids because their likelihood is piecewise. "
+            "Use init_method='auto' or init_method='grid'."
         )
 
     hdf5_cache_reused = _reset_hdf5_cache_statistics(grids)
@@ -1150,6 +1473,18 @@ def MCMC(obs, obs_err, photbands,
     else:
         nwalkers = pos.shape[0]
 
+    initial_log_probability = np.asarray([
+        lnprob(theta, obs, obs_err, limits, **kwargs)[0]
+        for theta in np.asarray(pos, dtype=float)
+    ])
+    if not np.all(np.isfinite(initial_log_probability)):
+        invalid = int(np.sum(~np.isfinite(initial_log_probability)))
+        raise ValueError(
+            "Walker initialization produced {} non-finite posterior position(s). "
+            "Refusing to start emcee; use the grid-aware initializer or provide "
+            "validated starting positions.".format(invalid)
+        )
+
     grid_initialization_seconds = time.perf_counter() - grid_initialization_start
     cache_preload_start = time.perf_counter()
     walker_cache_preloaded = _preload_hdf5_walker_neighborhood(
@@ -1180,7 +1515,6 @@ def MCMC(obs, obs_err, photbands,
     log_prob_func = lnprob
     log_prob_args = (obs, obs_err, limits)
     log_prob_kwargs = kwargs
-    grid_list = list(grids) if hasattr(grids, '__iter__') else [grids]
     use_vectorized_likelihood = (
         bool(vectorized_likelihood)
         and nworkers == 1
@@ -1280,6 +1614,12 @@ def MCMC(obs, obs_err, photbands,
         early_cache_preloaded
     )
     diagnostics['hdf5_cache_reused_at_fit_start'] = bool(hdf5_cache_reused)
+    diagnostics['initial_log_probability_min'] = float(
+        np.min(initial_log_probability)
+    )
+    diagnostics['initial_log_probability_max'] = float(
+        np.max(initial_log_probability)
+    )
     diagnostics['vectorized_likelihood'] = bool(use_vectorized_likelihood)
     diagnostics['hdf5_walker_cache_preloaded'] = bool(walker_cache_preloaded)
     diagnostics['hdf5_cache'] = _hdf5_cache_diagnostics(grids, nworkers)

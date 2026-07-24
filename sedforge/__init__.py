@@ -1,4 +1,4 @@
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 __title__ = "sedforge"
 __description__ = "Flux-based photometric SED fitter"
 __author__ = "SED-fit contributors"

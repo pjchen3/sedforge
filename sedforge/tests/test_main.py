@@ -462,6 +462,20 @@ def test_fits_grid_keeps_map_initialization(monkeypatch, tmp_path):
     assert calls['init_method'] == 'map'
 
 
+def test_newera_grid_rejects_map_initialization(tmp_path):
+    photfile = tmp_path / 'target.phot'
+    photfile.write_text(
+        'photband flux flux_err\n'
+        'GAIA3E_G 1.0e-12 1.0e-14\n'
+    )
+    setup = _setup(photfile)
+    setup['grids'] = ['newera_alpha0']
+    setup['init_method'] = 'map'
+
+    with pytest.raises(ValueError, match='non-rectangular'):
+        main.validate_setup(setup)
+
+
 def test_fixed_parameter_is_not_sampled_but_is_used_for_grid(monkeypatch, tmp_path):
     photfile = tmp_path / 'target.phot'
     photfile.write_text(
